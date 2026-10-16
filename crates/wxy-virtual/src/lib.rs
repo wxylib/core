@@ -32,7 +32,9 @@ use wxy_domain::{Frame, Positions};
 use wxy_source::{ChunkSource, Error, Result};
 use zarrs::storage::AsyncReadableStorageTraits;
 
+#[cfg(feature = "refs")]
 pub mod refs;
+#[cfg(feature = "refs")]
 pub use refs::from_refs_table;
 
 /// A reference to one stored chunk: its key in the Zarr chunk grid and the
@@ -145,7 +147,7 @@ pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
         }
     }
     if let Some(n) = field.values.nodata {
-        attrs.insert("_FillValue".into(), json!(n));
+        attrs.insert("_FillValue".into(), wxy_zarr::write::float_json(n));
     }
 
     let metadata = json!({

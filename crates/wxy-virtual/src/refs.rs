@@ -136,7 +136,20 @@ impl ArrayRow {
             _ => None,
         };
         let values = match &v["values"] {
-            Value::Array(a) => Some(a.iter().filter_map(Value::as_f64).collect()),
+            Value::Array(a) => {
+                let x: Vec<f64> = a
+                    .iter()
+                    .map(|x| match x {
+                        Value::String(s) => s.parse().ok(),
+                        _ => x.as_f64(),
+                    })
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| bad("values", v))?;
+                if Some(&(x.len() as u64)) != shape.first() || shape.len() != 1 {
+                    return Err(bad("values", v));
+                }
+                Some(x)
+            }
             _ => None,
         };
         Ok(ArrayRow {
@@ -284,7 +297,7 @@ fn referenced(
 ) -> Result<VirtualArray> {
     let mut attrs = row.attrs.clone();
     if let Some(f) = row.fill {
-        attrs.insert("_FillValue".into(), json!(f));
+        attrs.insert("_FillValue".into(), wxy_zarr::write::float_json(f));
     }
     let n = row.dims.len();
     if n >= 2 {
@@ -299,6 +312,8 @@ fn referenced(
                     [row.shape[n - 2], row.shape[n - 1]],
                 )
                 .to_attrs(&mut attrs);
+                // An assumption: CF latitude and longitude name no datum,
+                // so WGS 84 is taken (right for OISST).
                 if is_lat(y) && is_lon(x) {
                     wxy_geozarr::Proj {
                         code: Some("EPSG:4326".into()),
