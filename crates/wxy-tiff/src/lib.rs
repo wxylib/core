@@ -48,8 +48,15 @@ pub struct IfdSource {
 }
 
 impl IfdSource {
-    fn ifd(&self) -> &ImageFileDirectory {
+    /// The async-tiff image directory behind this level (tile offsets,
+    /// byte counts, compression), for scanners.
+    pub fn ifd(&self) -> &ImageFileDirectory {
         &self.tiff.ifds()[self.ifd]
+    }
+
+    /// The file's byte order.
+    pub fn endianness(&self) -> async_tiff::reader::Endianness {
+        self.tiff.endianness()
     }
 }
 

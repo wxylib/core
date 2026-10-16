@@ -40,7 +40,7 @@ struct Case {
     windows: Vec<(u64, u64, u64, u64, String)>,
 }
 
-fn cases(dir: &PathBuf) -> Vec<Case> {
+fn cases(dir: &std::path::Path) -> Vec<Case> {
     let text = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     let u = |x: &serde_json::Value| x.as_u64().unwrap();
@@ -104,7 +104,7 @@ fn cases(dir: &PathBuf) -> Vec<Case> {
 async fn windows_match_gdal() {
     let Some(dir) = fixtures() else { return };
     let cases = cases(&dir);
-    assert_eq!(cases.len(), 4);
+    assert!(cases.len() >= 4, "{} cases", cases.len());
     for c in cases {
         let ds = wxy_tiff::open_path(dir.join(&c.file)).await.unwrap();
         let level0 = &ds.collection.domains[0];
@@ -154,9 +154,9 @@ async fn windows_match_gdal() {
             let Positions::Affine(a) = &d.primary_for(2).unwrap().positions else {
                 panic!()
             };
-            for j in 0..6 {
+            for (got, want) in a.0.iter().zip(want) {
                 assert!(
-                    (a.0[j] - want[j]).abs() < 1e-6 * want[j].abs().max(1.0),
+                    (got - want).abs() < 1e-6 * want.abs().max(1.0),
                     "{} level {}: {:?}",
                     c.file,
                     k + 1,
