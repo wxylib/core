@@ -1,0 +1,25 @@
+[package]
+name = "wxy-cli"
+description = "The wxy command: wxylib from the shell."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories = ["science::geo", "command-line-utilities"]
+
+[[bin]]
+name = "wxy"
+path = "src/main.rs"
+
+[dependencies]
+wxy-domain.workspace = true
+wxy-source.workspace = true
+wxy-tiff = { path = "../wxy-tiff" }
+wxy-zarr = { path = "../wxy-zarr" }
+wxy-warp = { path = "../wxy-warp" }
+clap = { version = "4", features = ["derive"] }
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json = "1"

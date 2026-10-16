@@ -18,6 +18,7 @@
 //!   recovers a regular grid when there is one.
 //!
 //! Stage S3 reads regular chunk grids of fixed-size numeric types.
+//! [`write`] writes one georeferenced grid the same way (stage S4).
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -34,6 +35,9 @@ use zarrs::array::data_type as zdt;
 use zarrs::array::{Array, ArrayBytes, ArrayToBytesCodecTraits, CodecOptions, FromArrayBytes};
 use zarrs::group::Group;
 use zarrs::storage::AsyncReadableStorageTraits;
+
+pub mod write;
+pub use write::{write_path, write_store, GridArray};
 
 type Storage = dyn AsyncReadableStorageTraits;
 

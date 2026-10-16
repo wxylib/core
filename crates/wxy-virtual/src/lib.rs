@@ -144,10 +144,10 @@ pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
         "zarr_format": 3,
         "node_type": "array",
         "shape": shape,
-        "data_type": zarr_dtype(level.dtype())?,
+        "data_type": wxy_zarr::write::data_type_name(level.dtype())?,
         "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": chunk_shape}},
         "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
-        "fill_value": fill_json(level.dtype(), fill),
+        "fill_value": wxy_zarr::write::fill_value_json(level.dtype(), fill),
         "codecs": codecs,
         "dimension_names": ["band", "y", "x"],
         "attributes": attrs,
@@ -157,33 +157,6 @@ pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
         metadata,
         refs,
     })
-}
-
-fn zarr_dtype(d: wxy_domain::DataType) -> Result<&'static str> {
-    use wxy_domain::DataType as D;
-    Ok(match d {
-        D::Bool => "bool",
-        D::U8 => "uint8",
-        D::U16 => "uint16",
-        D::U32 => "uint32",
-        D::U64 => "uint64",
-        D::I8 => "int8",
-        D::I16 => "int16",
-        D::I32 => "int32",
-        D::I64 => "int64",
-        D::F32 => "float32",
-        D::F64 => "float64",
-        other => return Err(Error::Unsupported(format!("data type {other:?}"))),
-    })
-}
-
-fn fill_json(d: wxy_domain::DataType, v: f64) -> Value {
-    use wxy_domain::DataType as D;
-    match d {
-        D::F32 | D::F64 => json!(v),
-        D::Bool => json!(v != 0.0),
-        _ => json!(v as i64),
-    }
 }
 
 /// The URL prefix a set of arrays reads from: the directory of each file.

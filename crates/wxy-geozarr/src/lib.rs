@@ -283,6 +283,40 @@ impl Proj {
         }
     }
 
+    /// The `proj:` property a CRS string belongs in: `AUTH:CODE` is a code,
+    /// a JSON object is PROJJSON, and a bracketed keyword form is WKT2.
+    /// Anything else (a PROJ string, say) has no `proj:` property.
+    pub fn from_definition(def: &str) -> Option<Self> {
+        let def = def.trim();
+        if def.starts_with('{') {
+            let v: Value = serde_json::from_str(def).ok()?;
+            return v.is_object().then(|| Proj {
+                projjson: Some(v),
+                ..Default::default()
+            });
+        }
+        if let Some((auth, code)) = def.split_once(':') {
+            let word = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric());
+            if word(auth) && word(code) {
+                return Some(Proj {
+                    code: Some(def.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+        let keyword = def.split('[').next().unwrap_or("");
+        if def.ends_with(']')
+            && !keyword.is_empty()
+            && keyword.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+        {
+            return Some(Proj {
+                wkt2: Some(def.to_string()),
+                ..Default::default()
+            });
+        }
+        None
+    }
+
     /// One string for the CRS: the code, else WKT2, else PROJJSON text.
     pub fn definition(&self) -> Option<String> {
         self.code
@@ -366,5 +400,16 @@ mod tests {
             .unwrap()
             .geotransform()
             .is_none());
+    }
+
+    #[test]
+    fn proj_from_definition() {
+        let code = Proj::from_definition("EPSG:3031").unwrap();
+        assert_eq!(code.code.as_deref(), Some("EPSG:3031"));
+        let wkt = Proj::from_definition("GEOGCRS[\"WGS 84\"]").unwrap();
+        assert!(wkt.wkt2.is_some());
+        let pj = Proj::from_definition(r#"{"type": "GeographicCRS"}"#).unwrap();
+        assert!(pj.projjson.is_some());
+        assert!(Proj::from_definition("+proj=stere +lat_0=-90").is_none());
     }
 }
