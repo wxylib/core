@@ -163,18 +163,57 @@ impl SourceGrid {
 ///   above the source are moved to -2 (still outside after truncation),
 ///   which is what GDAL's floor gives.
 struct Approx {
-    approx: ApproxTransformer<GenImgProjTransformer>,
-    exact: GenImgProjTransformer,
+    /// `None` when the error threshold is 0: every point exact, as GDAL
+    /// does without its approximate transformer.
+    approx: Option<ApproxTransformer<Globe>>,
+    exact: Globe,
     nearest: bool,
-    /// Source width in columns, when source longitudes wrap, and height in
-    /// rows, when it also reaches both poles.
+    /// The same wrap, applied again after interpolation: for a -180..180
+    /// source, the only wrap, catching points just past its edge.
     globe: Option<(f64, Option<f64>)>,
+}
+
+/// The exact transformer, with source longitudes wrapped when the source
+/// covers the globe but does not start at -180. This is where GDAL wraps
+/// (its `+lon_wrap` for sources outside -180..180), under the approximate
+/// transformer, so interpolation sees the wrap's jump and subdivides across
+/// it: a 0..360 source then matches GDAL at its 0/360 seam. A -180..180
+/// source is not wrapped here, so its approximation stays GDAL's.
+struct Globe {
+    inner: GenImgProjTransformer,
+    globe: Option<(f64, Option<f64>)>,
+}
+
+impl rwarp::Transformer for Globe {
+    fn transform(&self, dst_to_src: bool, x: &mut [f64], y: &mut [f64]) -> Vec<bool> {
+        let ok = self.inner.transform(dst_to_src, x, y);
+        if dst_to_src {
+            wrap(self.globe, x, y, &ok);
+        }
+        ok
+    }
+}
+
+/// Wrap source columns into `[0, w)` and clamp pole rows to the source,
+/// for `globe = (w, h)` (see [`SourceGrid::globe`]).
+fn wrap(globe: Option<(f64, Option<f64>)>, x: &mut [f64], y: &mut [f64], ok: &[bool]) {
+    let Some((w, h)) = globe else { return };
+    for i in (0..ok.len()).filter(|&i| ok[i]) {
+        x[i] = x[i].rem_euclid(w);
+        if let Some(h) = h {
+            // A pole maps to row 0 or row h exactly: the edge, not past it.
+            y[i] = y[i].clamp(0.0, h - 1e-9);
+        }
+    }
 }
 
 impl rwarp::Transformer for Approx {
     fn transform(&self, dst_to_src: bool, x: &mut [f64], y: &mut [f64]) -> Vec<bool> {
         let (x0, y0) = (x.to_vec(), y.to_vec());
-        let mut ok = self.approx.transform(dst_to_src, x, y);
+        let mut ok = match &self.approx {
+            Some(a) => a.transform(dst_to_src, x, y),
+            None => self.exact.transform(dst_to_src, x, y),
+        };
         let failed: Vec<usize> = (0..ok.len()).filter(|&i| !ok[i]).collect();
         if !failed.is_empty() {
             let mut fx: Vec<f64> = failed.iter().map(|&i| x0[i]).collect();
@@ -186,14 +225,8 @@ impl rwarp::Transformer for Approx {
                 ok[i] = fok[k];
             }
         }
-        if let (Some((w, h)), true) = (self.globe, dst_to_src) {
-            for i in (0..ok.len()).filter(|&i| ok[i]) {
-                x[i] = x[i].rem_euclid(w);
-                if let Some(h) = h {
-                    // A pole maps to row 0 or row h exactly: the edge, not past it.
-                    y[i] = y[i].clamp(0.0, h - 1e-9);
-                }
-            }
+        if dst_to_src {
+            wrap(self.globe, x, y, &ok);
         }
         if self.nearest && dst_to_src {
             for v in x.iter_mut().chain(y.iter_mut()) {
@@ -208,15 +241,28 @@ impl rwarp::Transformer for Approx {
 
 fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<Approx> {
     let (threshold, alg) = (opts.error_threshold, opts.resampling);
-    let make = || {
-        GenImgProjTransformer::new(&src.crs, src.geotransform, &dst.crs, dst.geotransform)
-            .map_err(Error::Unsupported)
+    let globe = if opts.wrap_globe { src.globe()? } else { None };
+    let west =
+        src.geotransform[0].min(src.geotransform[0] + src.geotransform[1] * src.size()[0] as f64);
+    let under = globe.filter(|_| (west + 180.0).abs() > 0.01 * src.geotransform[1].abs());
+    let make = || -> Result<Globe> {
+        let inner =
+            GenImgProjTransformer::new(&src.crs, src.geotransform, &dst.crs, dst.geotransform)
+                .map_err(Error::Unsupported)?;
+        Ok(Globe {
+            inner,
+            globe: under,
+        })
     };
     Ok(Approx {
-        approx: ApproxTransformer::new(make()?, threshold),
+        approx: if threshold > 0.0 {
+            Some(ApproxTransformer::new(make()?, threshold))
+        } else {
+            None
+        },
         exact: make()?,
         nearest: alg == ResampleAlg::NearestNeighbour,
-        globe: if opts.wrap_globe { src.globe()? } else { None },
+        globe,
     })
 }
 

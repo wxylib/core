@@ -91,7 +91,7 @@ async fn warps_match_gdal() {
             let m = r["resampling"].as_str().unwrap();
             let opts = WarpOptions {
                 resampling: alg(m),
-                wrap_globe: false,
+                wrap_globe: case["wrap_globe"].as_bool().unwrap_or(false),
                 ..Default::default()
             };
             let out = warp(
