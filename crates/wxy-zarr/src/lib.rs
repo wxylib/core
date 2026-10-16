@@ -117,7 +117,7 @@ pub async fn open(storage: Arc<Storage>, path: &str) -> Result<ZarrDataset> {
     let mut collection = Collection::new(path.trim_start_matches('/'));
     collection.add_domain(domain);
     let mut field = Field::new(path.rsplit('/').next().unwrap_or("data"), source.dtype, 0);
-    field.values.nodata = attrs.get("_FillValue").and_then(Value::as_f64);
+    field.values.nodata = attrs.get("_FillValue").and_then(write::json_float);
     if let Some(s) = attrs.get("scale_factor").and_then(Value::as_f64) {
         field.values.scale = Some(s);
     }

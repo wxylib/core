@@ -12,6 +12,8 @@ use zarrs::array::{Array, ArrayMetadata, ArraySubset};
 use zarrs::group::{Group, GroupMetadata};
 use zarrs::storage::AsyncReadableWritableStorageTraits;
 
+pub use wxy_geozarr::Proj;
+
 type WritableStorage = dyn AsyncReadableWritableStorageTraits;
 
 /// What to write: dims (the last two are y and x), shape, chunk shape,
@@ -77,7 +79,7 @@ impl GridArray {
             p.to_attrs(&mut attrs);
         }
         if let Some(v) = self.nodata {
-            attrs.insert("_FillValue".into(), json!(v));
+            attrs.insert("_FillValue".into(), float_json(v));
         }
         Ok(attrs)
     }
@@ -217,8 +219,35 @@ pub fn data_type_name(d: DataType) -> Result<&'static str> {
 pub fn fill_value_json(d: DataType, v: f64) -> Value {
     use DataType as D;
     match d {
-        D::F32 | D::F64 => json!(v),
+        D::F32 | D::F64 => float_json(v),
         D::Bool => json!(v != 0.0),
         _ => json!(v as i64),
+    }
+}
+
+/// A float as JSON, with Zarr v3's strings for the values JSON has no
+/// number for (`json!(f64::NAN)` would be `null`).
+pub fn float_json(v: f64) -> Value {
+    if v.is_nan() {
+        json!("NaN")
+    } else if v == f64::INFINITY {
+        json!("Infinity")
+    } else if v == f64::NEG_INFINITY {
+        json!("-Infinity")
+    } else {
+        json!(v)
+    }
+}
+
+/// A float from JSON written by [`float_json`] (or any number).
+pub fn json_float(v: &Value) -> Option<f64> {
+    match v {
+        Value::String(s) => match s.as_str() {
+            "NaN" => Some(f64::NAN),
+            "Infinity" => Some(f64::INFINITY),
+            "-Infinity" => Some(f64::NEG_INFINITY),
+            _ => None,
+        },
+        _ => v.as_f64(),
     }
 }

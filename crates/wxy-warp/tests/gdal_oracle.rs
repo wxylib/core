@@ -91,6 +91,7 @@ async fn warps_match_gdal() {
             let m = r["resampling"].as_str().unwrap();
             let opts = WarpOptions {
                 resampling: alg(m),
+                wrap_globe: false,
                 ..Default::default()
             };
             let out = warp(
@@ -123,4 +124,85 @@ async fn warps_match_gdal() {
         .map(|(_, _, l)| l)
         .collect();
     assert!(failed.is_empty(), "warps differ from GDAL: {failed:#?}");
+}
+
+/// With longitude wrapping (the default), a target column whose cell
+/// centres sit exactly on the antimeridian reads from the source instead of
+/// coming back empty as it does from GDAL; nothing else changes.
+#[tokio::test]
+async fn antimeridian_column_wraps() {
+    let root = fixtures();
+    let Ok(file) = std::fs::File::open(root.join("warp/manifest.json")) else {
+        eprintln!("skipping: no fixtures at {}", root.display());
+        return;
+    };
+    let manifest: Value = serde_json::from_reader(file).unwrap();
+    let case = manifest["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "world-to-3031")
+        .unwrap();
+    let ds = wxy_tiff::open_path(root.join(case["source"].as_str().unwrap()))
+        .await
+        .unwrap();
+    let dst = GridSpec::from_extent("EPSG:3031", [-4.0e6, 4.0e6, -4.0e6, 4.0e6], [145, 145]);
+    let out = warp(
+        &ds.levels[0],
+        &ds.collection.domains[0],
+        &dst,
+        &WarpOptions::default(),
+        None,
+    )
+    .await
+    .unwrap();
+    let want = decode(
+        &std::fs::read(root.join("warp/world-to-3031-near.bin")).unwrap(),
+        "int16",
+    );
+    let got = out.values.to_f64();
+    let differ: Vec<usize> = (0..got.len()).filter(|&i| got[i] != want[i]).collect();
+    // Column 72 is x = 0; its cells below the pole are at longitude 180.
+    assert!(differ.len() > 60, "{} cells differ", differ.len());
+    for i in differ {
+        assert_eq!(i % 145, 72, "cell {i} differs");
+        assert_eq!(want[i], 0.0, "GDAL filled cell {i}");
+    }
+}
+
+/// A target cell centred on the south pole reads the source's bottom row
+/// (where -90 sits exactly on the edge) instead of coming back empty.
+#[tokio::test]
+async fn pole_cell_reads_the_edge_row() {
+    let root = fixtures();
+    let path = root.join("cog/world-int16-deflate.tif");
+    let Ok(ds) = wxy_tiff::open_path(&path).await else {
+        eprintln!("skipping: no fixtures at {}", root.display());
+        return;
+    };
+    let dst = GridSpec::from_extent("EPSG:3031", [-5.0e6, 5.0e6, -5.0e6, 5.0e6], [101, 101]);
+    let run = |wrap_globe| {
+        let opts = WarpOptions {
+            wrap_globe,
+            nodata: Some(-32768.0),
+            ..Default::default()
+        };
+        let (src, domain, dst) = (&ds.levels[0], &ds.collection.domains[0], &dst);
+        async move { warp(src, domain, dst, &opts, None).await.unwrap() }
+    };
+    let centre = 50 * 101 + 50;
+    assert_eq!(run(false).await.values.to_f64()[centre], -32768.0);
+    let got = run(true).await.values.to_f64()[centre];
+    let bottom = wxy_source::read_window(
+        &ds.levels[0],
+        &wxy_source::Window::new(vec![0, 359, 0], vec![1, 1, 720]),
+    )
+    .await
+    .unwrap()
+    .values
+    .to_f64();
+    assert!(
+        bottom.contains(&got),
+        "pole cell {got} is not from the bottom row"
+    );
 }

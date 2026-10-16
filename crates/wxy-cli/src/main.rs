@@ -30,7 +30,9 @@ struct Warp {
     source: PathBuf,
     /// Output Zarr store directory, created if missing.
     output: PathBuf,
-    /// Target CRS, such as EPSG:3031 (AUTH:CODE, WKT2 or PROJJSON).
+    /// Target CRS as an EPSG:NNNN code, such as EPSG:3031. (The CRS backend
+    /// also reads PROJ strings, but GeoZarr's proj: has no place to record
+    /// one; WKT2 and PROJJSON wait on a PROJ-backed CRS.)
     #[arg(long)]
     crs: String,
     /// Target extent: xmin ymin xmax ymax, in target CRS units.
@@ -54,6 +56,10 @@ struct Warp {
     /// Array to write in the output store.
     #[arg(long, default_value = "/data")]
     array: String,
+    /// Leave target cells beyond a 360 degree lon/lat source's edge empty,
+    /// as GDAL's warper does, instead of wrapping longitude and reading pole rows.
+    #[arg(long)]
+    no_wrap: bool,
     /// Replace the output array if it exists.
     #[arg(long)]
     overwrite: bool,
@@ -114,6 +120,16 @@ async fn warp(w: Warp) -> Result<(), Failure> {
     if existing.exists() && !w.overwrite {
         return Err(format!("{} exists (use --overwrite)", existing.display()).into());
     }
+    // Check the CRS before reading anything: the warp must understand it
+    // and the GeoZarr writer must be able to record it.
+    wxy_warp::check_crs(&w.crs)?;
+    if wxy_zarr::write::Proj::from_definition(&w.crs).is_none() {
+        return Err(format!(
+            "--crs {:?} cannot be recorded as GeoZarr proj: (use EPSG:NNNN)",
+            w.crs
+        )
+        .into());
+    }
     let src = open(&w.source, &w.source_array).await?;
     let (e, s) = (&w.extent, &w.size);
     if e[0] >= e[2] || e[1] >= e[3] {
@@ -127,6 +143,7 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         resampling: w.resampling.into(),
         error_threshold: w.error_threshold,
         nodata: w.nodata,
+        wrap_globe: !w.no_wrap,
     };
     let out = wxy_warp::warp(&*src.source, &src.domain, &dst, &opts, src.nodata).await?;
 

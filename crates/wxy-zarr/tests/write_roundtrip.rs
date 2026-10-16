@@ -33,3 +33,20 @@ async fn write_then_open() {
         .unwrap();
     assert_eq!(got.values, values);
 }
+
+#[tokio::test]
+async fn nan_nodata_survives() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("write-nan.zarr");
+    let _ = std::fs::remove_dir_all(&root);
+    let values = Values::F32(vec![f32::NAN, 1.0, 2.0, 3.0]);
+    let mut grid = GridArray::new(vec![2, 2], [0.0, 1.0, 0.0, 2.0, 0.0, -1.0]);
+    grid.nodata = Some(f64::NAN);
+    wxy_zarr::write_path(&root, "/data", &values, &grid)
+        .await
+        .unwrap();
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("data/zarr.json")).unwrap()).unwrap();
+    assert_eq!(meta["fill_value"], "NaN");
+    let ds = wxy_zarr::open_path(&root, "/data").await.unwrap();
+    assert!(ds.collection.fields[0].values.nodata.unwrap().is_nan());
+}

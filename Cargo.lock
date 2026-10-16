@@ -5121,6 +5121,7 @@ dependencies = [
 name = "wxy-warp"
 version = "0.0.1"
 dependencies = [
+ "proj4rs",
  "rwarp",
  "serde_json",
  "tokio",
