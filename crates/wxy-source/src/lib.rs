@@ -234,6 +234,7 @@ impl Values {
     }
 
     /// Every value as `f64`, for checks and simple consumers.
+    #[allow(clippy::unnecessary_cast)] // the F64 arm of the macro
     pub fn to_f64(&self) -> Vec<f64> {
         each_values!(self, v => v.iter().map(|&x| x as f64).collect())
     }

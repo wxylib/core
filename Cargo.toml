@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wxy-domain", "crates/wxy-source", "crates/wxy-tiff"]
+members = ["crates/wxy-domain", "crates/wxy-source", "crates/wxy-tiff", "crates/wxy-zarr"]
 
 [workspace.package]
 version = "0.0.1"

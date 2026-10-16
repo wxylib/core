@@ -1,0 +1,21 @@
+[package]
+name = "wxy-zarr"
+description = "Zarr for wxylib, through zarrs: a Collection plus chunk sources, georeferenced by the GeoZarr spatial and proj conventions or CF coordinates."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories = ["science::geo"]
+
+[dependencies]
+wxy-domain.workspace = true
+wxy-source.workspace = true
+async-trait.workspace = true
+object_store.workspace = true
+zarrs = { version = "0.23.14", default-features = false, features = ["async", "blosc", "crc32c", "gzip", "sharding", "transpose", "zstd", "zlib"] }
+zarrs_object_store = "0.7.0"
+serde_json = "1"
+
+[dev-dependencies]
+tokio.workspace = true
