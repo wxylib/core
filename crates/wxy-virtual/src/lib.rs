@@ -169,15 +169,29 @@ pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
 }
 
 /// The URL prefix a set of arrays reads from: the directory of each file.
+/// For local files the directory of each file; for HTTP(S) the scheme and
+/// host, one container per server.
 fn container_prefixes(arrays: &[VirtualArray]) -> Vec<String> {
     let mut out: Vec<String> = arrays
         .iter()
         .flat_map(|a| a.refs.iter())
-        .filter_map(|r| r.url.rfind('/').map(|k| r.url[..=k].to_string()))
+        .filter_map(|r| container_prefix(&r.url))
         .collect();
     out.sort();
     out.dedup();
     out
+}
+
+fn container_prefix(url: &str) -> Option<String> {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        let host = rest.split('/').next()?;
+        let scheme = &url[..url.len() - rest.len()];
+        return Some(format!("{scheme}{host}/"));
+    }
+    url.rfind('/').map(|k| url[..=k].to_string())
 }
 
 fn config(
@@ -191,7 +205,11 @@ fn config(
     for p in prefixes {
         let store = if p.starts_with("file://") {
             ObjectStoreConfig::LocalFileSystem(Default::default())
+        } else if p.starts_with("https://") || p.starts_with("http://") {
+            ObjectStoreConfig::Http(Default::default())
         } else {
+            // s3:// and others: not yet. A public bucket reads over HTTPS
+            // (remap s3://bucket/ to https://bucket.s3.amazonaws.com/).
             return Err(Error::Unsupported(format!("virtual chunk location {p}")));
         };
         let c = VirtualChunkContainer::new(p.clone(), store).map_err(Error::Fetch)?;
@@ -279,7 +297,8 @@ pub async fn write_icechunk(repo: impl AsRef<Path>, arrays: &[VirtualArray]) -> 
 }
 
 /// Open the tip of `main` in a local Icechunk repository as zarrs storage,
-/// authorising reads under `prefixes` (such as `file:///data/cogs/`).
+/// authorising reads under `prefixes` (such as `file:///data/cogs/` or
+/// `https://example.org/`; see [`prefixes`]).
 pub async fn open_icechunk(
     repo: impl AsRef<Path>,
     prefixes: &[String],
