@@ -54,6 +54,7 @@ impl IfdSource {
 }
 
 /// Open a local file.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn open_path(path: impl AsRef<std::path::Path>) -> Result<TiffDataset> {
     let path = std::fs::canonicalize(path.as_ref()).map_err(|e| Error::Fetch(e.to_string()))?;
     let store = Arc::new(object_store::local::LocalFileSystem::new());

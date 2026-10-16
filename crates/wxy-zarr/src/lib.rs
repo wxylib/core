@@ -51,6 +51,7 @@ pub struct ZarrSource {
 }
 
 /// Open array `array` (a path such as `"/data"`) in a local store.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn open_path(root: impl AsRef<std::path::Path>, array: &str) -> Result<ZarrDataset> {
     let root = std::fs::canonicalize(root.as_ref()).map_err(|e| Error::Fetch(e.to_string()))?;
     let fs = object_store::local::LocalFileSystem::new_with_prefix(root)
