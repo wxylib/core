@@ -16,11 +16,31 @@ wxy-geozarr.workspace = true
 wxy-tiff = { path = "../wxy-tiff", version = "0.0.1" }
 wxy-zarr = { path = "../wxy-zarr", version = "0.0.1" }
 async-tiff.workspace = true
-icechunk = { version = "~2.3.0", default-features = false, features = ["object-store-fs"] }
+icechunk = { version = "~2.3.0", default-features = false, features = ["object-store-fs", "object-store-http"] }
 zarrs_icechunk = "0.6.0"
 serde_json = "1"
 zarrs = { version = "0.23.14", default-features = false, features = ["async"] }
 tokio = { version = "1.43", features = ["sync"] }
+parquet = { version = "60.0.0", default-features = false, features = ["arrow", "zstd", "snap"], optional = true }
+arrow-array = { version = "60.0.0", default-features = false, optional = true }
+arrow-schema = { version = "60.0.0", default-features = false, optional = true }
+arrow-cast = { version = "60.0.0", default-features = false, optional = true }
+
+[features]
+default = ["refs"]
+# Byte-reference tables (mdim-refs Parquet export) as a source.
+refs = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-cast"]
 
 [dev-dependencies]
+wxy-warp = { path = "../wxy-warp", version = "0.0.1" }
+async-trait.workspace = true
+sha2 = "0.11.1"
 tokio.workspace = true
+
+[[test]]
+name = "mdimrefs_oracle"
+required-features = ["refs"]
+
+[[example]]
+name = "oisst_refs"
+required-features = ["refs"]

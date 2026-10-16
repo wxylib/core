@@ -12,6 +12,9 @@
 //! or planar. Chunky multi-band tiles are pixel-interleaved, which is a
 //! Zarr `transpose` codec over `(band, y, x)`. Other TIFFs are reported as
 //! unsupported rather than referenced wrongly.
+//!
+//! [`refs`] reads a byte-reference table (mdim-refs, one row per chunk) as
+//! a second source: the table is the scan, already done by someone else.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,6 +32,11 @@ use wxy_domain::{Frame, Positions};
 use wxy_source::{ChunkSource, Error, Result};
 use zarrs::storage::AsyncReadableStorageTraits;
 
+#[cfg(feature = "refs")]
+pub mod refs;
+#[cfg(feature = "refs")]
+pub use refs::from_refs_table;
+
 /// A reference to one stored chunk: its key in the Zarr chunk grid and the
 /// bytes that hold it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,13 +48,15 @@ pub struct ChunkRef {
 }
 
 /// One virtual array: where it goes in the hierarchy, its Zarr v3
-/// metadata (`zarr.json`), and its chunk references. Chunks with no
-/// reference read as the fill value.
+/// metadata (`zarr.json`), its chunk references, and any chunks small
+/// enough to store inline (encoded bytes by chunk key, such as coordinate
+/// values). Chunks with neither read as the fill value.
 #[derive(Debug, Clone)]
 pub struct VirtualArray {
     pub path: String,
     pub metadata: Value,
     pub refs: Vec<ChunkRef>,
+    pub inline: Vec<(Vec<u64>, Vec<u8>)>,
 }
 
 /// Scan level 0 of a local TIFF into a virtual array at `/data`.
@@ -137,7 +147,7 @@ pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
         }
     }
     if let Some(n) = field.values.nodata {
-        attrs.insert("_FillValue".into(), json!(n));
+        attrs.insert("_FillValue".into(), wxy_zarr::write::float_json(n));
     }
 
     let metadata = json!({
@@ -156,19 +166,34 @@ pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
         path: "/data".into(),
         metadata,
         refs,
+        inline: Vec::new(),
     })
 }
 
 /// The URL prefix a set of arrays reads from: the directory of each file.
+/// For local files the directory of each file; for HTTP(S) the scheme and
+/// host, one container per server.
 fn container_prefixes(arrays: &[VirtualArray]) -> Vec<String> {
     let mut out: Vec<String> = arrays
         .iter()
         .flat_map(|a| a.refs.iter())
-        .filter_map(|r| r.url.rfind('/').map(|k| r.url[..=k].to_string()))
+        .filter_map(|r| container_prefix(&r.url))
         .collect();
     out.sort();
     out.dedup();
     out
+}
+
+fn container_prefix(url: &str) -> Option<String> {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        let host = rest.split('/').next()?;
+        let scheme = &url[..url.len() - rest.len()];
+        return Some(format!("{scheme}{host}/"));
+    }
+    url.rfind('/').map(|k| url[..=k].to_string())
 }
 
 fn config(
@@ -182,7 +207,11 @@ fn config(
     for p in prefixes {
         let store = if p.starts_with("file://") {
             ObjectStoreConfig::LocalFileSystem(Default::default())
+        } else if p.starts_with("https://") || p.starts_with("http://") {
+            ObjectStoreConfig::Http(Default::default())
         } else {
+            // s3:// and others: not yet. A public bucket reads over HTTPS
+            // (remap s3://bucket/ to https://bucket.s3.amazonaws.com/).
             return Err(Error::Unsupported(format!("virtual chunk location {p}")));
         };
         let c = VirtualChunkContainer::new(p.clone(), store).map_err(Error::Fetch)?;
@@ -228,6 +257,14 @@ pub async fn write_icechunk(repo: impl AsRef<Path>, arrays: &[VirtualArray]) -> 
             .set(&key, serde_json::to_vec(&a.metadata).map_err(ice)?.into())
             .await
             .map_err(ice)?;
+        for (k, bytes) in &a.inline {
+            let ks: Vec<String> = k.iter().map(u64::to_string).collect();
+            let key = format!("{}/c/{}", a.path.trim_start_matches('/'), ks.join("/"));
+            store.set(&key, bytes.clone().into()).await.map_err(ice)?;
+        }
+        if a.refs.is_empty() {
+            continue;
+        }
         let path: icechunk::format::Path = a.path.as_str().try_into().map_err(ice)?;
         let mut refs = Vec::with_capacity(a.refs.len());
         for r in &a.refs {
@@ -262,7 +299,8 @@ pub async fn write_icechunk(repo: impl AsRef<Path>, arrays: &[VirtualArray]) -> 
 }
 
 /// Open the tip of `main` in a local Icechunk repository as zarrs storage,
-/// authorising reads under `prefixes` (such as `file:///data/cogs/`).
+/// authorising reads under `prefixes` (such as `file:///data/cogs/` or
+/// `https://example.org/`; see [`prefixes`]).
 pub async fn open_icechunk(
     repo: impl AsRef<Path>,
     prefixes: &[String],
