@@ -1,7 +1,8 @@
 # wxylib/core
 
 The wxylib Cargo workspace. Design, decisions and roadmap are in
-[wxylib/design](https://github.com/wxylib/design).
+[wxylib/design](https://github.com/wxylib/design). New here? Start with the
+[intro page](https://github.com/wxylib/docs#readme).
 
 | Crate | Stage | What it is |
 |-------|-------|------------|
