@@ -52,6 +52,11 @@ pub struct WarpOptions {
     pub error_threshold: f64,
     /// Nodata, overriding the source's.
     pub nodata: Option<f64>,
+    /// When the source is lon/lat and spans 360 degrees, wrap source
+    /// longitudes into it, so that a target cell at exactly 180 (or just
+    /// past it) reads from the other edge. GDAL's warper leaves such cells
+    /// empty; `false` matches it.
+    pub wrap_longitude: bool,
 }
 
 impl Default for WarpOptions {
@@ -60,6 +65,7 @@ impl Default for WarpOptions {
             resampling: ResampleAlg::NearestNeighbour,
             error_threshold: 0.125,
             nodata: None,
+            wrap_longitude: true,
         }
     }
 }
@@ -117,6 +123,13 @@ impl SourceGrid {
         [self.shape[self.x_dim] as i32, self.shape[self.y_dim] as i32]
     }
 
+    /// Whether the source is lon/lat, unrotated, and 360 degrees wide.
+    fn spans_globe(&self) -> Result<bool> {
+        let g = self.geotransform;
+        let width = g[1] * self.size()[0] as f64;
+        Ok(g[2] == 0.0 && (width.abs() - 360.0).abs() < 1e-9 && proj(&self.crs)?.is_latlong())
+    }
+
     fn bands(&self) -> u64 {
         if self.shape.len() == 3 {
             self.shape[0]
@@ -140,6 +153,8 @@ struct Approx {
     approx: ApproxTransformer<GenImgProjTransformer>,
     exact: GenImgProjTransformer,
     nearest: bool,
+    /// Source width in columns, when source longitudes wrap.
+    wrap: Option<f64>,
 }
 
 impl rwarp::Transformer for Approx {
@@ -157,6 +172,11 @@ impl rwarp::Transformer for Approx {
                 ok[i] = fok[k];
             }
         }
+        if let (Some(w), true) = (self.wrap, dst_to_src) {
+            for (v, _) in x.iter_mut().zip(&ok).filter(|(_, &ok)| ok) {
+                *v = v.rem_euclid(w);
+            }
+        }
         if self.nearest && dst_to_src {
             for v in x.iter_mut().chain(y.iter_mut()) {
                 if *v < 0.0 && *v > -1.0 {
@@ -168,12 +188,8 @@ impl rwarp::Transformer for Approx {
     }
 }
 
-fn transformer(
-    src: &SourceGrid,
-    dst: &GridSpec,
-    threshold: f64,
-    alg: ResampleAlg,
-) -> Result<Approx> {
+fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<Approx> {
+    let (threshold, alg) = (opts.error_threshold, opts.resampling);
     let make = || {
         GenImgProjTransformer::new(&src.crs, src.geotransform, &dst.crs, dst.geotransform)
             .map_err(Error::Unsupported)
@@ -182,7 +198,19 @@ fn transformer(
         approx: ApproxTransformer::new(make()?, threshold),
         exact: make()?,
         nearest: alg == ResampleAlg::NearestNeighbour,
+        wrap: (opts.wrap_longitude && src.spans_globe()?).then(|| src.size()[0] as f64),
     })
+}
+
+/// Parse `def` as the CRS backend does: an `EPSG:NNNN` code or a PROJ
+/// string (proj4rs: no WKT, PROJJSON or other authorities yet).
+pub fn check_crs(def: &str) -> Result<()> {
+    proj(def).map(|_| ())
+}
+
+fn proj(def: &str) -> Result<proj4rs::proj::Proj> {
+    proj4rs::proj::Proj::from_user_string(def)
+        .map_err(|e| Error::Unsupported(format!("CRS {def:?}: {e} (EPSG:NNNN or a PROJ string)")))
 }
 
 /// The source window the whole target needs, or `None` when the target
@@ -196,7 +224,7 @@ fn transformer(
 /// [`build_source_grid`]) widens the window to cover them. A wider window
 /// changes no output values, only how much is read.
 pub fn plan(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<Option<SourceWindow>> {
-    let t = transformer(src, dst, opts.error_threshold, opts.resampling)?;
+    let t = transformer(src, dst, opts)?;
     let dst_size = [dst.size[0] as i32, dst.size[1] as i32];
     let size = src.size();
     let back = compute_source_window(&t, [0, 0], dst_size, size, opts.resampling.radius());
@@ -295,7 +323,7 @@ pub async fn warp<S: ChunkSource + ?Sized>(
     };
     let buf = read_window(source, &read).await?;
 
-    let t = transformer(&src, dst, opts.error_threshold, opts.resampling)?;
+    let t = transformer(&src, dst, opts)?;
     let b = bands as usize;
     let (xs, ys) = (xs as usize, ys as usize);
     macro_rules! run {

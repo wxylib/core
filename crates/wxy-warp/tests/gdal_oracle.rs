@@ -91,6 +91,7 @@ async fn warps_match_gdal() {
             let m = r["resampling"].as_str().unwrap();
             let opts = WarpOptions {
                 resampling: alg(m),
+                wrap_longitude: false,
                 ..Default::default()
             };
             let out = warp(
@@ -123,4 +124,48 @@ async fn warps_match_gdal() {
         .map(|(_, _, l)| l)
         .collect();
     assert!(failed.is_empty(), "warps differ from GDAL: {failed:#?}");
+}
+
+/// With longitude wrapping (the default), a target column whose cell
+/// centres sit exactly on the antimeridian reads from the source instead of
+/// coming back empty as it does from GDAL; nothing else changes.
+#[tokio::test]
+async fn antimeridian_column_wraps() {
+    let root = fixtures();
+    let Ok(file) = std::fs::File::open(root.join("warp/manifest.json")) else {
+        eprintln!("skipping: no fixtures at {}", root.display());
+        return;
+    };
+    let manifest: Value = serde_json::from_reader(file).unwrap();
+    let case = manifest["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "world-to-3031")
+        .unwrap();
+    let ds = wxy_tiff::open_path(root.join(case["source"].as_str().unwrap()))
+        .await
+        .unwrap();
+    let dst = GridSpec::from_extent("EPSG:3031", [-4.0e6, 4.0e6, -4.0e6, 4.0e6], [145, 145]);
+    let out = warp(
+        &ds.levels[0],
+        &ds.collection.domains[0],
+        &dst,
+        &WarpOptions::default(),
+        None,
+    )
+    .await
+    .unwrap();
+    let want = decode(
+        &std::fs::read(root.join("warp/world-to-3031-near.bin")).unwrap(),
+        "int16",
+    );
+    let got = out.values.to_f64();
+    let differ: Vec<usize> = (0..got.len()).filter(|&i| got[i] != want[i]).collect();
+    // Column 72 is x = 0; its cells below the pole are at longitude 180.
+    assert!(differ.len() > 60, "{} cells differ", differ.len());
+    for i in differ {
+        assert_eq!(i % 145, 72, "cell {i} differs");
+        assert_eq!(want[i], 0.0, "GDAL filled cell {i}");
+    }
 }

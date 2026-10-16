@@ -81,6 +81,7 @@ async fn warp_writes_what_gdal_writes() {
             ])
             .args(extent.map(|v| v.to_string()))
             .args(["--size", &w.to_string(), &h.to_string()])
+            .arg("--no-wrap")
             .status()
             .unwrap();
         assert!(status.success(), "{name} {method} from {source}");
@@ -103,5 +104,30 @@ async fn warp_writes_what_gdal_writes() {
             case["dtype"].as_str().unwrap(),
         );
         assert_eq!(got.values.to_f64(), want, "{name} {method} from {source}");
+    }
+}
+
+#[test]
+fn crs_the_writer_cannot_record_is_refused_before_reading() {
+    let run = |crs: &str| {
+        Command::new(env!("CARGO_BIN_EXE_wxy"))
+            .args(["warp", "no-such-source.tif", "unused.zarr", "--crs", crs])
+            .args(["--extent", "0", "0", "1", "1", "--size", "1", "1"])
+            .output()
+            .unwrap()
+    };
+    for crs in [
+        "+proj=stere +lat_0=-90 +lat_ts=-71",
+        "OGC:CRS84",
+        "GEOGCRS[\"x\"]",
+    ] {
+        let out = run(crs);
+        assert!(!out.status.success());
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("CRS") || err.contains("crs"), "{crs}: {err}");
+        assert!(
+            !err.contains("no-such-source"),
+            "{crs} read the source: {err}"
+        );
     }
 }

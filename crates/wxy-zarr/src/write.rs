@@ -12,6 +12,8 @@ use zarrs::array::{Array, ArrayMetadata, ArraySubset};
 use zarrs::group::{Group, GroupMetadata};
 use zarrs::storage::AsyncReadableWritableStorageTraits;
 
+pub use wxy_geozarr::Proj;
+
 type WritableStorage = dyn AsyncReadableWritableStorageTraits;
 
 /// What to write: dims (the last two are y and x), shape, chunk shape,
