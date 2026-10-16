@@ -12,6 +12,9 @@
 //! or planar. Chunky multi-band tiles are pixel-interleaved, which is a
 //! Zarr `transpose` codec over `(band, y, x)`. Other TIFFs are reported as
 //! unsupported rather than referenced wrongly.
+//!
+//! [`refs`] reads a byte-reference table (mdim-refs, one row per chunk) as
+//! a second source: the table is the scan, already done by someone else.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,6 +32,9 @@ use wxy_domain::{Frame, Positions};
 use wxy_source::{ChunkSource, Error, Result};
 use zarrs::storage::AsyncReadableStorageTraits;
 
+pub mod refs;
+pub use refs::from_refs_table;
+
 /// A reference to one stored chunk: its key in the Zarr chunk grid and the
 /// bytes that hold it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,13 +46,15 @@ pub struct ChunkRef {
 }
 
 /// One virtual array: where it goes in the hierarchy, its Zarr v3
-/// metadata (`zarr.json`), and its chunk references. Chunks with no
-/// reference read as the fill value.
+/// metadata (`zarr.json`), its chunk references, and any chunks small
+/// enough to store inline (encoded bytes by chunk key, such as coordinate
+/// values). Chunks with neither read as the fill value.
 #[derive(Debug, Clone)]
 pub struct VirtualArray {
     pub path: String,
     pub metadata: Value,
     pub refs: Vec<ChunkRef>,
+    pub inline: Vec<(Vec<u64>, Vec<u8>)>,
 }
 
 /// Scan level 0 of a local TIFF into a virtual array at `/data`.
@@ -156,6 +164,7 @@ pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
         path: "/data".into(),
         metadata,
         refs,
+        inline: Vec::new(),
     })
 }
 
@@ -228,6 +237,14 @@ pub async fn write_icechunk(repo: impl AsRef<Path>, arrays: &[VirtualArray]) -> 
             .set(&key, serde_json::to_vec(&a.metadata).map_err(ice)?.into())
             .await
             .map_err(ice)?;
+        for (k, bytes) in &a.inline {
+            let ks: Vec<String> = k.iter().map(u64::to_string).collect();
+            let key = format!("{}/c/{}", a.path.trim_start_matches('/'), ks.join("/"));
+            store.set(&key, bytes.clone().into()).await.map_err(ice)?;
+        }
+        if a.refs.is_empty() {
+            continue;
+        }
         let path: icechunk::format::Path = a.path.as_str().try_into().map_err(ice)?;
         let mut refs = Vec::with_capacity(a.refs.len());
         for r in &a.refs {
