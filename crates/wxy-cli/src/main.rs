@@ -57,7 +57,7 @@ struct Warp {
     #[arg(long, default_value = "/data")]
     array: String,
     /// Leave target cells beyond a 360 degree lon/lat source's edge empty,
-    /// as GDAL's warper does, instead of wrapping longitude.
+    /// as GDAL's warper does, instead of wrapping longitude and reading pole rows.
     #[arg(long)]
     no_wrap: bool,
     /// Replace the output array if it exists.
@@ -143,7 +143,7 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         resampling: w.resampling.into(),
         error_threshold: w.error_threshold,
         nodata: w.nodata,
-        wrap_longitude: !w.no_wrap,
+        wrap_globe: !w.no_wrap,
     };
     let out = wxy_warp::warp(&*src.source, &src.domain, &dst, &opts, src.nodata).await?;
 

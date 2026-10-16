@@ -54,9 +54,10 @@ pub struct WarpOptions {
     pub nodata: Option<f64>,
     /// When the source is lon/lat and spans 360 degrees, wrap source
     /// longitudes into it, so that a target cell at exactly 180 (or just
-    /// past it) reads from the other edge. GDAL's warper leaves such cells
-    /// empty; `false` matches it.
-    pub wrap_longitude: bool,
+    /// past it) reads from the other edge; when it also spans -90 to 90,
+    /// a cell centred on a pole reads the edge row it sits on. GDAL's
+    /// warper leaves such cells empty; `false` matches it.
+    pub wrap_globe: bool,
 }
 
 impl Default for WarpOptions {
@@ -65,7 +66,7 @@ impl Default for WarpOptions {
             resampling: ResampleAlg::NearestNeighbour,
             error_threshold: 0.125,
             nodata: None,
-            wrap_longitude: true,
+            wrap_globe: true,
         }
     }
 }
@@ -123,11 +124,21 @@ impl SourceGrid {
         [self.shape[self.x_dim] as i32, self.shape[self.y_dim] as i32]
     }
 
-    /// Whether the source is lon/lat, unrotated, and 360 degrees wide.
-    fn spans_globe(&self) -> Result<bool> {
+    /// For an unrotated lon/lat source 360 degrees wide, its width in
+    /// columns, and its height in rows when it runs from pole to pole.
+    fn globe(&self) -> Result<Option<(f64, Option<f64>)>> {
         let g = self.geotransform;
-        let width = g[1] * self.size()[0] as f64;
-        Ok(g[2] == 0.0 && (width.abs() - 360.0).abs() < 1e-9 && proj(&self.crs)?.is_latlong())
+        let [w, h] = self.size().map(|n| n as f64);
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        if g[2] != 0.0 || g[4] != 0.0 || !near((g[1] * w).abs(), 360.0) {
+            return Ok(None);
+        }
+        if !proj(&self.crs)?.is_latlong() {
+            return Ok(None);
+        }
+        let (top, bottom) = (g[3], g[3] + g[5] * h);
+        let poles = near(top.max(bottom), 90.0) && near(top.min(bottom), -90.0);
+        Ok(Some((w, poles.then_some(h))))
     }
 
     fn bands(&self) -> u64 {
@@ -153,8 +164,9 @@ struct Approx {
     approx: ApproxTransformer<GenImgProjTransformer>,
     exact: GenImgProjTransformer,
     nearest: bool,
-    /// Source width in columns, when source longitudes wrap.
-    wrap: Option<f64>,
+    /// Source width in columns, when source longitudes wrap, and height in
+    /// rows, when it also reaches both poles.
+    globe: Option<(f64, Option<f64>)>,
 }
 
 impl rwarp::Transformer for Approx {
@@ -172,9 +184,13 @@ impl rwarp::Transformer for Approx {
                 ok[i] = fok[k];
             }
         }
-        if let (Some(w), true) = (self.wrap, dst_to_src) {
-            for (v, _) in x.iter_mut().zip(&ok).filter(|(_, &ok)| ok) {
-                *v = v.rem_euclid(w);
+        if let (Some((w, h)), true) = (self.globe, dst_to_src) {
+            for i in (0..ok.len()).filter(|&i| ok[i]) {
+                x[i] = x[i].rem_euclid(w);
+                if let Some(h) = h {
+                    // A pole maps to row 0 or row h exactly: the edge, not past it.
+                    y[i] = y[i].clamp(0.0, h - 1e-9);
+                }
             }
         }
         if self.nearest && dst_to_src {
@@ -198,7 +214,7 @@ fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<A
         approx: ApproxTransformer::new(make()?, threshold),
         exact: make()?,
         nearest: alg == ResampleAlg::NearestNeighbour,
-        wrap: (opts.wrap_longitude && src.spans_globe()?).then(|| src.size()[0] as f64),
+        globe: if opts.wrap_globe { src.globe()? } else { None },
     })
 }
 
