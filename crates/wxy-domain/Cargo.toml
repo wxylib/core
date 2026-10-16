@@ -1,0 +1,13 @@
+[package]
+name = "wxy-domain"
+description = "Domains, mappings and fields: one data model for grids, meshes and features. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["raster", "mesh", "grid", "geospatial", "zarr"]
+categories = ["science::geo"]
+
+[dependencies]
+vaster.workspace = true
