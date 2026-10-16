@@ -129,15 +129,17 @@ impl SourceGrid {
     fn globe(&self) -> Result<Option<(f64, Option<f64>)>> {
         let g = self.geotransform;
         let [w, h] = self.size().map(|n| n as f64);
-        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
-        if g[2] != 0.0 || g[4] != 0.0 || !near((g[1] * w).abs(), 360.0) {
+        // Within a hundredth of a cell: steps read from float32 coordinates
+        // (0.25 stored as 0.2500000x) miss 360 by far more than rounding.
+        let near = |a: f64, b: f64, step: f64| (a - b).abs() < 0.01 * step.abs();
+        if g[2] != 0.0 || g[4] != 0.0 || !near((g[1] * w).abs(), 360.0, g[1]) {
             return Ok(None);
         }
         if !proj(&self.crs)?.is_latlong() {
             return Ok(None);
         }
         let (top, bottom) = (g[3], g[3] + g[5] * h);
-        let poles = near(top.max(bottom), 90.0) && near(top.min(bottom), -90.0);
+        let poles = near(top.max(bottom), 90.0, g[5]) && near(top.min(bottom), -90.0, g[5]);
         Ok(Some((w, poles.then_some(h))))
     }
 
