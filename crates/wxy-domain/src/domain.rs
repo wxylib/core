@@ -19,7 +19,10 @@ pub struct Domain {
 
 impl Domain {
     pub fn new(dims: Vec<Dim>) -> Self {
-        Self { dims, ..Default::default() }
+        Self {
+            dims,
+            ..Default::default()
+        }
     }
 
     pub fn shape(&self) -> Vec<u64> {

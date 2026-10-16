@@ -34,7 +34,9 @@ fn ghrsst_float32_axis_is_regular() {
 
     let (p, report) = regular_axis(&stored, CellConvention::Centre, Tolerance::Float32);
     assert!(report.accepted, "{report}");
-    let Some(Positions::Regular1 { origin, step }) = p else { panic!() };
+    let Some(Positions::Regular1 { origin, step }) = p else {
+        panic!()
+    };
     assert!((origin + 180.0).abs() < 1e-4, "origin {origin}");
     assert!((step - 0.01).abs() < 1e-9, "step {step}");
 }
@@ -51,9 +53,16 @@ fn aviso_latitude_is_regular_in_mercator() {
     let lat: Vec<f64> = y.iter().map(|&v| v.sinh().atan().to_degrees()).collect();
 
     let (p, plain) = regular_axis(&lat, CellConvention::Centre, Tolerance::Float64);
-    assert!(p.is_none(), "latitude itself should not be regular: {plain}");
+    assert!(
+        p.is_none(),
+        "latitude itself should not be regular: {plain}"
+    );
 
-    let merc_y = |deg: f64| (std::f64::consts::FRAC_PI_4 + deg.to_radians() / 2.0).tan().ln();
+    let merc_y = |deg: f64| {
+        (std::f64::consts::FRAC_PI_4 + deg.to_radians() / 2.0)
+            .tan()
+            .ln()
+    };
     let (p, report) = regular_axis_through(
         &lat,
         merc_y,
@@ -63,7 +72,9 @@ fn aviso_latitude_is_regular_in_mercator() {
     );
     assert!(report.accepted, "{report}");
     assert!(report.max_deviation_steps < 1e-10, "{report}");
-    let Some(Positions::Regular1 { step: s, .. }) = p else { panic!() };
+    let Some(Positions::Regular1 { step: s, .. }) = p else {
+        panic!()
+    };
     assert!((s - step).abs() < 1e-12);
 }
 
@@ -133,13 +144,29 @@ fn nsidc_cryptic_curvilinear_is_regular_in_its_projection() {
 /// are kept.
 #[test]
 fn oisst_axes_normalise_to_an_affine() {
-    let lon = to_f32(&(0..1440).map(|i| 0.125 + 0.25 * i as f64).collect::<Vec<_>>());
-    let lat = to_f32(&(0..720).map(|i| 89.875 - 0.25 * i as f64).collect::<Vec<_>>());
+    let lon = to_f32(
+        &(0..1440)
+            .map(|i| 0.125 + 0.25 * i as f64)
+            .collect::<Vec<_>>(),
+    );
+    let lat = to_f32(
+        &(0..720)
+            .map(|i| 89.875 - 0.25 * i as f64)
+            .collect::<Vec<_>>(),
+    );
     let frame = Frame::crs("OGC:CRS84");
 
     let mut d = Domain::new(vec![Dim::new("lat", 720), Dim::new("lon", 1440)]);
-    d.add_mapping(Mapping::new(vec![0], Positions::Rectilinear(vec![lat]), frame.clone()));
-    d.add_mapping(Mapping::new(vec![1], Positions::Rectilinear(vec![lon]), frame.clone()));
+    d.add_mapping(Mapping::new(
+        vec![0],
+        Positions::Rectilinear(vec![lat]),
+        frame.clone(),
+    ));
+    d.add_mapping(Mapping::new(
+        vec![1],
+        Positions::Rectilinear(vec![lon]),
+        frame.clone(),
+    ));
     assert_eq!(d.rung_for(1), Rung::Rectilinear);
 
     let reports = normalise_domain(&mut d);

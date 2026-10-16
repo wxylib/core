@@ -10,7 +10,9 @@ use crate::field::Field;
 pub enum RelationKind {
     /// `to` is an overview of `from`, coarser by `factor` along each
     /// mapped dim (not necessarily an integer, as in GDAL).
-    Overview { factor: Vec<f64> },
+    Overview {
+        factor: Vec<f64>,
+    },
     /// `to` holds another stagger location of the same grid (SGRID, the
     /// Arakawa C-grid's u and v points).
     Stagger,
@@ -39,7 +41,10 @@ pub struct Collection {
 
 impl Collection {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), ..Default::default() }
+        Self {
+            name: name.into(),
+            ..Default::default()
+        }
     }
 
     pub fn add_domain(&mut self, domain: Domain) -> usize {
@@ -48,7 +53,10 @@ impl Collection {
     }
 
     pub fn add_field(&mut self, field: Field) -> usize {
-        assert!(field.domain < self.domains.len(), "field names a missing domain");
+        assert!(
+            field.domain < self.domains.len(),
+            "field names a missing domain"
+        );
         self.fields.push(field);
         self.fields.len() - 1
     }

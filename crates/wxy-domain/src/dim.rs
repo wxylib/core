@@ -9,6 +9,9 @@ pub struct Dim {
 
 impl Dim {
     pub fn new(name: impl Into<String>, size: u64) -> Self {
-        Self { name: name.into(), size }
+        Self {
+            name: name.into(),
+            size,
+        }
     }
 }

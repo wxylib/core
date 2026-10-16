@@ -27,7 +27,10 @@ impl Affine {
 
     pub fn forward(&self, col: f64, row: f64) -> (f64, f64) {
         let g = &self.0;
-        (g[0] + col * g[1] + row * g[2], g[3] + col * g[4] + row * g[5])
+        (
+            g[0] + col * g[1] + row * g[2],
+            g[3] + col * g[4] + row * g[5],
+        )
     }
 
     pub fn inverse(&self) -> Option<Affine> {

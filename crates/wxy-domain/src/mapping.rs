@@ -130,7 +130,11 @@ fn interp_nd(values: &[f64], shape: &[usize], index: &[f64]) -> Option<f64> {
         let mut off = 0;
         for d in 0..nd {
             let up = (corner >> d) & 1 == 1;
-            let k = if up && shape[d] > 1 { base[d] + 1 } else { base[d] };
+            let k = if up && shape[d] > 1 {
+                base[d] + 1
+            } else {
+                base[d]
+            };
             w *= if up { frac[d] } else { 1.0 - frac[d] };
             off += k * strides[d];
         }

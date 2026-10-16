@@ -1,0 +1,18 @@
+[package]
+name = "wxy-source"
+description = "Chunk sources for wxylib: plan, fetch and decode, with chunking in index space."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories = ["science::geo"]
+
+[dependencies]
+wxy-domain.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

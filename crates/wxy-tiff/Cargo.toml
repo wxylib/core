@@ -1,0 +1,20 @@
+[package]
+name = "wxy-tiff"
+description = "GeoTIFF and COG for wxylib, through async-tiff: a Collection plus chunk sources."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories = ["science::geo"]
+
+[dependencies]
+wxy-domain.workspace = true
+wxy-source.workspace = true
+async-trait.workspace = true
+async-tiff.workspace = true
+object_store.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+serde_json = "1"

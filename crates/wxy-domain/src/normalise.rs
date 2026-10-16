@@ -85,7 +85,11 @@ pub struct Report {
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let verdict = if self.accepted { "regular" } else { "not regular" };
+        let verdict = if self.accepted {
+            "regular"
+        } else {
+            "not regular"
+        };
         write!(
             f,
             "dims {:?}: {:?} -> {}{}; max deviation {:.3e} ({:.2e} steps), tolerance {:.3e}",
@@ -276,7 +280,9 @@ pub fn normalise_domain_with(domain: &mut Domain, tolerance: Tolerance) -> Vec<R
         .collect();
     for i in candidates {
         let m = &domain.mappings[i];
-        let Positions::Rectilinear(axes) = &m.positions else { unreachable!() };
+        let Positions::Rectilinear(axes) = &m.positions else {
+            unreachable!()
+        };
         let (found, mut report) = regular_axis(&axes[0], m.cell, tolerance);
         report.dims = m.dims.clone();
         report.frame = m.frame.clone();
@@ -302,8 +308,14 @@ pub fn affine_from_axes(domain: &Domain, row: usize, col: usize) -> Option<(Affi
     }
     match (&r.positions, &c.positions) {
         (
-            Positions::Regular1 { origin: y0, step: dy },
-            Positions::Regular1 { origin: x0, step: dx },
+            Positions::Regular1 {
+                origin: y0,
+                step: dy,
+            },
+            Positions::Regular1 {
+                origin: x0,
+                step: dx,
+            },
         ) => Some((Affine([*x0, *dx, 0.0, *y0, 0.0, *dy]), r.frame.clone())),
         _ => None,
     }
