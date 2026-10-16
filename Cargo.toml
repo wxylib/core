@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wxy-domain", "crates/wxy-source", "crates/wxy-tiff", "crates/wxy-geozarr", "crates/wxy-zarr", "crates/wxy-virtual"]
+members = ["crates/wxy-domain", "crates/wxy-source", "crates/wxy-tiff", "crates/wxy-geozarr", "crates/wxy-zarr", "crates/wxy-virtual", "crates/wxy-warp"]
 
 [workspace.package]
 version = "0.0.1"
@@ -21,3 +21,4 @@ thiserror = "2"
 async-tiff = { version = "0.4.0", default-features = false, features = ["object_store"] }
 object_store = "0.14"
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread"] }
+

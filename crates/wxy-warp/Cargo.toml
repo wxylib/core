@@ -1,0 +1,22 @@
+[package]
+name = "wxy-warp"
+description = "Warp wxylib sources to a target grid through rwarp: plan the source window, read it, resample."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories = ["science::geo"]
+
+[dependencies]
+wxy-domain.workspace = true
+wxy-source.workspace = true
+# rwarp is external (design doc 03, A2). Pinned to the repository until a
+# release carries the proj4rs backend and the generic kernel (crates.io
+# 0.1.1 predates both).
+rwarp = { git = "https://github.com/hypertidy/rwarp", rev = "20572c396307f71659508eda0411ee31e9d127c8", default-features = false, features = ["proj4rs"] }
+
+[dev-dependencies]
+tokio.workspace = true
+serde_json = "1"
+wxy-tiff = { path = "../wxy-tiff" }
