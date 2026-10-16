@@ -125,16 +125,14 @@ pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
     let mut attrs = serde_json::Map::new();
     if let Some(m) = ds.collection.domains[0].primary_for(2) {
         if let Positions::Affine(a) = &m.positions {
-            let g = a.0;
-            attrs.insert("zarr_conventions".into(), conventions());
-            attrs.insert("spatial:dimensions".into(), json!(["y", "x"]));
-            attrs.insert(
-                "spatial:transform".into(),
-                json!([g[1], g[2], g[0], g[4], g[5], g[3]]),
-            );
-            attrs.insert("spatial:shape".into(), json!([shape[1], shape[2]]));
+            wxy_geozarr::Spatial::from_geotransform(a.0, ["y", "x"], [shape[1], shape[2]])
+                .to_attrs(&mut attrs);
             if let Frame::Crs(c) = &m.frame {
-                attrs.insert("proj:code".into(), json!(c));
+                wxy_geozarr::Proj {
+                    code: Some(c.clone()),
+                    ..Default::default()
+                }
+                .to_attrs(&mut attrs);
             }
         }
     }
@@ -159,25 +157,6 @@ pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
         metadata,
         refs,
     })
-}
-
-fn conventions() -> Value {
-    json!([
-        {
-            "schema_url": "https://raw.githubusercontent.com/zarr-conventions/spatial/refs/tags/v0.1/schema.json",
-            "spec_url": "https://github.com/zarr-conventions/spatial/blob/v0.1/README.md",
-            "uuid": "689b58e2-cf7b-45e0-9fff-9cfc0883d6b4",
-            "name": "spatial",
-            "description": "Spatial coordinate information"
-        },
-        {
-            "schema_url": "https://raw.githubusercontent.com/zarr-conventions/proj/refs/tags/v0.1/schema.json",
-            "spec_url": "https://github.com/zarr-conventions/proj/blob/v0.1/README.md",
-            "uuid": "f17cb550-5864-4468-aeb7-f3180cfb622f",
-            "name": "proj",
-            "description": "Coordinate reference system information for geospatial data"
-        }
-    ])
 }
 
 fn zarr_dtype(d: wxy_domain::DataType) -> Result<&'static str> {

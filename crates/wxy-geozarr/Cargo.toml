@@ -1,0 +1,13 @@
+[package]
+name = "wxy-geozarr"
+description = "The GeoZarr spatial and proj conventions (zarr-conventions v0.1): read, write and declare them in Zarr attributes. No other wxylib dependency."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories = ["science::geo", "encoding"]
+
+[dependencies]
+serde_json = "1"
+thiserror.workspace = true

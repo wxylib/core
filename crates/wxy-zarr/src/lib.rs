@@ -88,13 +88,11 @@ pub async fn open(storage: Arc<Storage>, path: &str) -> Result<ZarrDataset> {
 
     // Array attributes over parent group attributes (convention inheritance).
     let parent = parent_path(&path);
-    let mut attrs = match Group::async_open(storage.clone(), &parent).await {
+    let group = match Group::async_open(storage.clone(), &parent).await {
         Ok(g) => g.attributes().clone(),
         Err(_) => Map::new(),
     };
-    for (k, v) in source.array.attributes() {
-        attrs.insert(k.clone(), v.clone());
-    }
+    let attrs = wxy_geozarr::inherit(&group, source.array.attributes());
     // spatial:dimensions is required on arrays; a group's value is a default.
     let frame = proj_frame(&attrs);
 
@@ -319,73 +317,36 @@ fn parent_path(p: &str) -> String {
     }
 }
 
-/// The frame from `proj:code`, else `proj:wkt2`, else `proj:projjson`.
+/// The frame from the `proj:` convention.
 fn proj_frame(attrs: &Map<String, Value>) -> Option<Frame> {
-    if let Some(c) = attrs.get("proj:code").and_then(Value::as_str) {
-        return Some(Frame::crs(c));
-    }
-    if let Some(w) = attrs.get("proj:wkt2").and_then(Value::as_str) {
-        return Some(Frame::crs(w));
-    }
-    attrs
-        .get("proj:projjson")
-        .filter(|v| v.is_object())
-        .map(|v| Frame::crs(v.to_string()))
+    wxy_geozarr::Proj::from_attrs(attrs)
+        .and_then(|p| p.definition())
+        .map(Frame::crs)
 }
 
 /// An affine mapping from the `spatial:` convention, in GDAL order on
-/// `[y_dim, x_dim]`. Node registration (the transform gives cell centres)
-/// is shifted to the outer corner, as for GeoTIFF PixelIsPoint.
+/// `[y_dim, x_dim]`, placing cell corners (node registration is shifted by
+/// [`wxy_geozarr`]). Unknown transform types are skipped, as the
+/// convention asks.
 fn spatial_mapping(
     attrs: &Map<String, Value>,
     domain: &Domain,
     frame: Option<Frame>,
 ) -> Result<Option<Mapping>> {
-    let Some(t) = attrs.get("spatial:transform") else {
+    let spatial =
+        wxy_geozarr::Spatial::from_attrs(attrs).map_err(|e| Error::Decode(e.to_string()))?;
+    let Some(spatial) = spatial else {
         return Ok(None);
     };
-    let kind = attrs
-        .get("spatial:transform_type")
-        .and_then(Value::as_str)
-        .unwrap_or("affine");
-    if kind != "affine" {
-        // Unknown types are skipped, as the convention asks.
+    let Some(gt) = spatial.geotransform() else {
         return Ok(None);
-    }
-    let t: Vec<f64> = t
-        .as_array()
-        .map(|a| a.iter().filter_map(Value::as_f64).collect())
-        .unwrap_or_default();
-    if t.len() != 6 {
-        return Err(Error::Decode("spatial:transform needs 6 numbers".into()));
-    }
-    let dims: Vec<String> = attrs
-        .get("spatial:dimensions")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let (y, x) = match dims.as_slice() {
-        [y, x] => (
-            domain.dim_index(y).ok_or_else(|| missing(y))?,
-            domain.dim_index(x).ok_or_else(|| missing(x))?,
-        ),
-        _ => {
-            return Err(Error::Decode(
-                "spatial:dimensions needs two dim names".into(),
-            ))
-        }
     };
-    // spatial:transform is [a, b, c, d, e, f]; GDAL is [c, a, b, f, d, e].
-    let mut gt = [t[2], t[0], t[1], t[5], t[3], t[4]];
-    let node = attrs.get("spatial:registration").and_then(Value::as_str) == Some("node");
-    if node {
-        gt[0] -= 0.5 * gt[1] + 0.5 * gt[2];
-        gt[3] -= 0.5 * gt[4] + 0.5 * gt[5];
-    }
+    let [ydim, xdim] = spatial
+        .dimensions
+        .as_ref()
+        .ok_or_else(|| Error::Decode("spatial:dimensions is required on arrays".into()))?;
+    let y = domain.dim_index(ydim).ok_or_else(|| missing(ydim))?;
+    let x = domain.dim_index(xdim).ok_or_else(|| missing(xdim))?;
     let frame = frame.unwrap_or(Frame::Index);
     Ok(Some(
         Mapping::new(vec![y, x], Positions::Affine(Affine(gt)), frame)

@@ -8,6 +8,7 @@ The wxylib Cargo workspace. Design, decisions and roadmap are in
 | [`wxy-domain`](crates/wxy-domain) | S1 | Domains, mappings and fields: one data model for grids, meshes and features. No I/O. |
 | [`wxy-source`](crates/wxy-source) | S2 | Chunk sources: plan, fetch, decode, with chunking in index space. |
 | [`wxy-tiff`](crates/wxy-tiff) | S2 | GeoTIFF and COG through async-tiff: a Collection plus one chunk source per level. |
+| [`wxy-geozarr`](crates/wxy-geozarr) | S3 | The GeoZarr `spatial:` and `proj:` conventions (v0.1) over JSON attributes; no other wxylib dependency, so any Zarr tool can use it. |
 | [`wxy-zarr`](crates/wxy-zarr) | S3 | Zarr through zarrs: georeferenced by the GeoZarr `spatial:`/`proj:` conventions or CF coordinates. |
 | [`wxy-virtual`](crates/wxy-virtual) | S3b | Scanners to virtual Zarr: TIFF tile byte ranges as Icechunk virtual references, read back through zarrs. |
 

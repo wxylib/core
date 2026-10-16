@@ -4618,6 +4618,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wxy-geozarr"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "wxy-source"
 version = "0.0.1"
 dependencies = [
@@ -4650,6 +4658,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "wxy-domain",
+ "wxy-geozarr",
  "wxy-source",
  "wxy-tiff",
  "wxy-zarr",
@@ -4666,6 +4675,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "wxy-domain",
+ "wxy-geozarr",
  "wxy-source",
  "zarrs",
  "zarrs_object_store",
