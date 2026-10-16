@@ -19,14 +19,17 @@
 //!   half a step), with `proj:code` EPSG:4326 when those dims are latitude
 //!   and longitude. Every coordinate is also written as a small CF
 //!   coordinate array with its values inline.
-//! - Rows with `present = 1` become [`ChunkRef`]s; absent rows are left
-//!   out and read as the fill value.
+//! - Rows with `present = 1` become [`ChunkRef`]s, or inline chunks when
+//!   the table holds their bytes (`offset` null, `data` set); absent rows
+//!   are left out and read as the fill value.
+//!
+//! Spec: wxylib/design `specs/mdim-refs-0.2.md`.
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
+use arrow_array::{Array, BinaryArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::DataType as ArrowType;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::{json, Map, Value};
@@ -70,10 +73,11 @@ pub fn from_refs_table(dir: impl AsRef<Path>, target: Option<&str>) -> Result<Ve
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(if row.storage == "referenced" {
-            let refs = read_refs(&dir.join(format!("refs_{}.parquet", row.name)), row, &|p| {
-                resolve(p, &remap, &dir)
-            })?;
-            referenced(row, &coords, refs)?
+            let (refs, inline) =
+                read_refs(&dir.join(format!("refs_{}.parquet", row.name)), row, &|p| {
+                    resolve(p, &remap, &dir)
+                })?;
+            referenced(row, &coords, refs, inline)?
         } else {
             coordinate(row)?
         });
@@ -276,6 +280,7 @@ fn referenced(
     row: &ArrayRow,
     coords: &HashMap<&str, &ArrayRow>,
     refs: Vec<ChunkRef>,
+    inline: Vec<(Vec<u64>, Vec<u8>)>,
 ) -> Result<VirtualArray> {
     let mut attrs = row.attrs.clone();
     if let Some(f) = row.fill {
@@ -308,7 +313,7 @@ fn referenced(
         path: format!("/{}", row.name),
         metadata: metadata(row, codecs(&row.codec, row.dtype)?, attrs)?,
         refs,
-        inline: Vec::new(),
+        inline,
     })
 }
 
@@ -397,12 +402,16 @@ fn resolve(path: &str, remap: &[(String, String)], dir: &Path) -> Result<String>
     Ok(format!("file://{}", local.display()))
 }
 
-/// The present rows of one `refs_<array>` export as chunk references.
+/// Encoded chunk bytes held in the table itself, by chunk key.
+type Inline = Vec<(Vec<u64>, Vec<u8>)>;
+
+/// The present rows of one `refs_<array>` export: referenced rows as chunk
+/// references, inline rows (`offset` null, `data` set) as encoded bytes.
 fn read_refs(
     file: &Path,
     row: &ArrayRow,
     url: &dyn Fn(&str) -> Result<String>,
-) -> Result<Vec<ChunkRef>> {
+) -> Result<(Vec<ChunkRef>, Inline)> {
     let pq = |e: parquet::errors::ParquetError| Error::Decode(format!("{}: {e}", file.display()));
     let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(file).map_err(io)?)
         .map_err(pq)?
@@ -417,6 +426,7 @@ fn read_refs(
         .collect();
     let mut urls: HashMap<String, String> = HashMap::new();
     let mut out = Vec::new();
+    let mut inline = Vec::new();
     for batch in reader {
         let batch = batch.map_err(|e| Error::Decode(e.to_string()))?;
         let dims: Vec<Int64Array> = (0..n)
@@ -430,6 +440,16 @@ fn read_refs(
             .as_any()
             .downcast_ref::<StringArray>()
             .ok_or_else(|| Error::Decode("refs: `path` is not a string column".into()))?;
+        let data = match batch.column_by_name("data") {
+            Some(c) => Some(
+                arrow_cast::cast(c, &ArrowType::Binary)
+                    .map_err(|e| Error::Decode(format!("refs: `data`: {e}")))?,
+            ),
+            None => None,
+        };
+        let data = data
+            .as_ref()
+            .and_then(|d| d.as_any().downcast_ref::<BinaryArray>());
         for r in 0..batch.num_rows() {
             if present.is_null(r) || present.value(r) == 0 {
                 continue;
@@ -440,6 +460,18 @@ fn read_refs(
                     "refs_{}: chunk {key:?} is outside the grid",
                     row.name
                 )));
+            }
+            if offset.is_null(r) {
+                match data.filter(|d| !d.is_null(r)) {
+                    Some(d) => inline.push((key, d.value(r).to_vec())),
+                    None => {
+                        return Err(Error::Decode(format!(
+                            "refs_{}: chunk {key:?} is present with no offset and no data",
+                            row.name
+                        )))
+                    }
+                }
+                continue;
             }
             let p = path.value(r);
             let u = match urls.get(p) {
@@ -458,7 +490,7 @@ fn read_refs(
             });
         }
     }
-    Ok(out)
+    Ok((out, inline))
 }
 
 fn column(batch: &RecordBatch, name: &str) -> Result<arrow_array::ArrayRef> {
@@ -476,4 +508,83 @@ fn int_column(batch: &RecordBatch, name: &str) -> Result<Int64Array> {
         .downcast_ref::<Int64Array>()
         .expect("cast to Int64")
         .clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow_array::{ArrayRef, BinaryArray, Int64Array, Int8Array, StringArray};
+    use parquet::arrow::ArrowWriter;
+
+    use super::*;
+
+    /// A 1 x 3 chunk grid: one referenced chunk (remapped), one inline,
+    /// one absent.
+    #[test]
+    fn rows_split_into_refs_and_inline() {
+        let dir = std::env::temp_dir().join(format!("wxy-refs-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("local")).unwrap();
+        std::fs::write(dir.join("local/a.bin"), [0u8; 16]).unwrap();
+        let table = json!({
+            "format_version": "mdim-refs/0.2",
+            "remap": [
+                {"target": "t", "prefix": "/src/", "replacement": "elsewhere/"},
+                {"target": "t", "prefix": "/src/a", "replacement": "local/a"},
+            ],
+            "arrays": [{
+                "array": "v", "kind": "data", "storage": "referenced",
+                "dims": ["y", "x"], "shape": [2, 6], "chunks": [2, 2],
+                "dtype": "<i4", "fill": "-1",
+                "codec": {"compressor": {"id": "zlib", "level": 1}, "filters": null},
+                "attrs": {}, "affine": null, "values": null,
+            }],
+        });
+        std::fs::write(dir.join("arrays.json"), table.to_string()).unwrap();
+        let cols: Vec<(&str, ArrayRef)> = vec![
+            ("dim_0", Arc::new(Int64Array::from(vec![0, 0, 0]))),
+            ("dim_1", Arc::new(Int64Array::from(vec![0, 1, 2]))),
+            ("present", Arc::new(Int8Array::from(vec![1, 1, 0]))),
+            (
+                "path",
+                Arc::new(StringArray::from(vec![Some("/src/a.bin"), None, None])),
+            ),
+            (
+                "offset",
+                Arc::new(Int64Array::from(vec![Some(4), None, None])),
+            ),
+            (
+                "size",
+                Arc::new(Int64Array::from(vec![Some(8), None, None])),
+            ),
+            (
+                "data",
+                Arc::new(BinaryArray::from(vec![None, Some(&b"xyz"[..]), None])),
+            ),
+        ];
+        let batch = RecordBatch::try_from_iter(cols).unwrap();
+        let f = File::create(dir.join("refs_v.parquet")).unwrap();
+        let mut w = ArrowWriter::try_new(f, batch.schema(), None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let arrays = from_refs_table(&dir, Some("t")).unwrap();
+        assert_eq!(arrays.len(), 1);
+        let a = &arrays[0];
+        let local = std::fs::canonicalize(dir.join("local/a.bin")).unwrap();
+        assert_eq!(
+            a.refs,
+            vec![ChunkRef {
+                key: vec![0, 0],
+                url: format!("file://{}", local.display()),
+                offset: 4,
+                length: 8,
+            }]
+        );
+        assert_eq!(a.inline, vec![(vec![0, 1], b"xyz".to_vec())]);
+        assert_eq!(a.metadata["fill_value"], json!(-1));
+        assert_eq!(a.metadata["codecs"][1]["name"], json!("numcodecs.zlib"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
