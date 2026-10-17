@@ -36,17 +36,20 @@ use rwarp::source_window::{build_source_grid, compute_source_window, SourceWindo
 use rwarp::transform::GenImgProjTransformer;
 use rwarp::warp::warp_resample_t;
 pub use rwarp::warp::ResampleAlg;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use wxy_domain::{CellConvention, CoordArray, Domain, Frame, Mapping, Positions};
 use wxy_source::{read_window, Buffer, ChunkSource, Error, Result, Values, Window};
 
 mod chunked;
+mod explain;
 mod extract;
 mod geoloc;
 mod rasterize;
 mod zonal;
 
+pub use explain::{Detail, Explain, Fetch, Region, SourceSummary, WarpChunk};
 pub use extract::{
     extract_points, plan_pixels, plan_points, PointMethod, PointOptions, PointPlan, PointValues,
 };
@@ -56,7 +59,7 @@ pub use zonal::{
 };
 
 /// A target grid: CRS, GDAL geotransform and size `[ncol, nrow]`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GridSpec {
     pub crs: String,
     pub geotransform: [f64; 6],
@@ -75,8 +78,11 @@ impl GridSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WarpOptions {
+    /// GDAL's `-r` names: near, bilinear, cubic, lanczos.
+    #[serde(with = "resample_alg")]
     pub resampling: ResampleAlg,
     /// Maximum error, in pixels, of the approximate transformer. `0`
     /// transforms every pixel exactly.
@@ -101,7 +107,8 @@ pub struct WarpOptions {
 }
 
 /// Overview choice for [`warp_pyramid`], as gdalwarp's `-ovr`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Overview {
     /// Full resolution only (`-ovr NONE`).
     None,
@@ -113,6 +120,36 @@ pub enum Overview {
     /// Overview `k` (0 is the first overview, not full resolution), or
     /// the coarsest when there are fewer (`-ovr k`).
     Level(usize),
+}
+
+/// [`ResampleAlg`] (rwarp's) as GDAL's `-r` names.
+mod resample_alg {
+    use super::ResampleAlg;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(r: &ResampleAlg, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match r {
+            ResampleAlg::NearestNeighbour => "near",
+            ResampleAlg::Bilinear => "bilinear",
+            ResampleAlg::Cubic => "cubic",
+            ResampleAlg::Lanczos => "lanczos",
+        })
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ResampleAlg, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(match s.as_str() {
+            "near" => ResampleAlg::NearestNeighbour,
+            "bilinear" => ResampleAlg::Bilinear,
+            "cubic" => ResampleAlg::Cubic,
+            "lanczos" => ResampleAlg::Lanczos,
+            _ => {
+                return Err(serde::de::Error::custom(format!(
+                    "resampling {s:?}: use near, bilinear, cubic or lanczos"
+                )))
+            }
+        })
+    }
 }
 
 impl Default for WarpOptions {

@@ -21,7 +21,7 @@ use async_tiff::metadata::cache::ReadaheadMetadataCache;
 use async_tiff::metadata::TiffMetadataReader;
 use async_tiff::reader::{AsyncFileReader, ObjectReader};
 use async_tiff::tags::PlanarConfiguration;
-use async_tiff::{ImageFileDirectory, Tile, TypedArray, TIFF};
+use async_tiff::{ImageFileDirectory, Tile, TileByteRange, TypedArray, TIFF};
 use async_trait::async_trait;
 use wxy_domain::{
     Affine, Collection, DataType, Dim, Domain, Field, Frame, Mapping, Positions, Relation,
@@ -264,6 +264,14 @@ fn tiff_dtype(ifd: &ImageFileDirectory) -> Option<async_tiff::DataType> {
 impl ChunkSource for IfdSource {
     fn grid(&self) -> &ChunkGrid {
         &self.grid
+    }
+
+    fn stored_bytes(&self, key: &ChunkKey) -> Option<u64> {
+        let (x, y) = (*key.0.get(2)? as usize, *key.0.get(1)? as usize);
+        Some(match self.ifd().tile_byte_range(x, y)? {
+            TileByteRange::Chunky(r) => r.end - r.start,
+            TileByteRange::Planar(rs) => rs.iter().map(|r| r.end - r.start).sum(),
+        })
     }
 
     fn dtype(&self) -> DataType {

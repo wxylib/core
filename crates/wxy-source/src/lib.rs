@@ -290,6 +290,11 @@ pub trait ChunkSource: Send + Sync {
     async fn fetch(&self, keys: &[ChunkKey]) -> Result<Vec<Encoded>>;
     /// CPU bound: decode one chunk.
     fn decode(&self, encoded: Encoded) -> Result<Chunk>;
+    /// Bytes a fetch of `key` reads, when the source knows without
+    /// fetching (a TIFF's tile byte counts); `None` otherwise.
+    fn stored_bytes(&self, _key: &ChunkKey) -> Option<u64> {
+        None
+    }
 }
 
 /// Plan, fetch and decode a window, and assemble the chunks into one buffer.

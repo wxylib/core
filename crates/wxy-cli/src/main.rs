@@ -56,6 +56,10 @@ struct Zonal {
     /// Place a curvilinear Zarr source by its CF cell bounds.
     #[arg(long)]
     bounds: bool,
+    /// Print the plan as JSON (the chunks it fetches, the bytes that
+    /// costs, how it is chunked) and stop, reading no data.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Parser)]
@@ -79,6 +83,10 @@ struct Points {
     /// interpolate as GDAL's InterpolateAtPoint, empty where it has no value.
     #[arg(long, short, value_enum, default_value_t = PointResampling::Near)]
     resampling: PointResampling,
+    /// Print the plan as JSON (the chunks it fetches, the bytes that
+    /// costs, how it is chunked) and stop, reading no data.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -142,6 +150,10 @@ struct Warp {
     /// Replace the output array if it exists.
     #[arg(long)]
     overwrite: bool,
+    /// Print the plan as JSON (the chunks it fetches, the bytes that
+    /// costs, how it is chunked) and stop, reading no data.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -257,6 +269,9 @@ async fn points(p: Points) -> Result<(), Failure> {
         wrap_globe: !p.no_wrap,
     };
     let plan = wxy_warp::plan_points(domain, &level.grid().chunk, &p.crs, &x, &y, &options)?;
+    if p.dry_run {
+        return print_plan(plan.explain(level, &options), &p.source, 0);
+    }
     let got = wxy_warp::extract_points(level, &plan, src.nodata).await?;
     let values = got.values.to_f64();
     let lead = got.leading.len();
@@ -377,6 +392,9 @@ async fn zonal(z: Zonal) -> Result<(), Failure> {
         wxy_warp::ZoneCells::Centre
     };
     let plan = wxy_warp::plan_zones(domain, &level.grid().chunk, &z.crs, &polys, cells)?;
+    if z.dry_run {
+        return print_plan(plan.explain(level), &z.source, 0);
+    }
     let stats = wxy_warp::zonal_stats(level, &plan, src.nodata).await?;
 
     let leading = plan.leading().to_vec();
@@ -410,12 +428,20 @@ async fn zonal(z: Zonal) -> Result<(), Failure> {
     Ok(())
 }
 
+/// A plan as JSON on stdout, with where its source came from.
+fn print_plan(mut e: wxy_warp::Explain, source: &Path, level: usize) -> Result<(), Failure> {
+    e.source.path = Some(source.display().to_string());
+    e.source.level = Some(level);
+    println!("{}", serde_json::to_string_pretty(&e)?);
+    Ok(())
+}
+
 async fn warp(w: Warp) -> Result<(), Failure> {
     let existing = w
         .output
         .join(w.array.trim_start_matches('/'))
         .join("zarr.json");
-    if existing.exists() && !w.overwrite {
+    if existing.exists() && !w.overwrite && !w.dry_run {
         return Err(format!("{} exists (use --overwrite)", existing.display()).into());
     }
     // Check the CRS before reading anything: the warp must understand it
@@ -459,6 +485,10 @@ async fn warp(w: Warp) -> Result<(), Failure> {
     // through in batches of whole source chunks, each written as it is
     // warped.
     let plan = WarpPlan::new(domain, level.dtype(), &dst, &opts, src.nodata)?;
+    if w.dry_run {
+        let e = plan.explain(level, wxy_warp::BATCH_BYTES);
+        return print_plan(e, &w.source, k);
+    }
     let mut shape = plan.leading().to_vec();
     shape.extend([s[1] as u64, s[0] as u64]);
     let mut grid = wxy_zarr::GridArray::new(shape, dst.geotransform);

@@ -890,4 +890,27 @@ async fn zonal_summarises_the_cells_gdal_burns() {
         checked += 1;
     }
     assert!(checked > 0);
+
+    // --dry-run: the plan as JSON, and no statistics
+    let out = Command::new(env!("CARGO_BIN_EXE_wxy"))
+        .arg("zonal")
+        .arg(&tif)
+        .arg(&gj)
+        .args(["--crs", "EPSG:32755", "--coverage", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["operation"], "zonal");
+    assert_eq!(plan["cells"], "coverage");
+    assert_eq!(plan["zones"], rings.len());
+    let keys = plan["fetch"]["keys"].as_array().unwrap();
+    assert_eq!(plan["fetch"]["chunks"], keys.len());
+    assert!(!keys.is_empty());
+    assert!(plan["fetch"]["stored_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(plan["source"]["shape"], serde_json::json!(shape));
 }

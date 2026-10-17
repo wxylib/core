@@ -5135,6 +5135,7 @@ dependencies = [
  "controlledburn",
  "proj4rs",
  "rwarp",
+ "serde",
  "serde_json",
  "tokio",
  "wxy-domain",

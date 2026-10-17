@@ -15,6 +15,7 @@
 //!   repeated beyond the edge, no value where a bilinear kernel touches
 //!   nodata, and nodata left out of a cubic kernel's weights.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use wxy_domain::Domain;
@@ -26,7 +27,8 @@ use crate::{transformer, GridSpec, ResampleAlg, SourceGrid, WarpOptions, IDENTIT
 pub(crate) const FETCH_BATCH: usize = 64;
 
 /// How a value is read at a point.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PointMethod {
     /// The cell the point falls in, in the source's type.
     #[default]
@@ -40,7 +42,8 @@ pub enum PointMethod {
 }
 
 /// Options for [`plan_points`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PointOptions {
     pub method: PointMethod,
     /// Wrap longitudes into a lon/lat source spanning 360 degrees (as

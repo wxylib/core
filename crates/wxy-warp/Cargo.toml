@@ -17,6 +17,8 @@ wxy-source.workspace = true
 wxy-resample.workspace = true
 # exact cell coverage of polygons (exactextract's algorithm), sparse
 controlledburn = "0.2.1"
+# plans and options as values (EXPLAIN, dry runs, bindings)
+serde.workspace = true
 proj4rs = { version = "0.1.10", default-features = false, features = ["crs-definitions"] }
 rwarp = { git = "https://github.com/hypertidy/rwarp", rev = "20572c396307f71659508eda0411ee31e9d127c8", default-features = false, features = ["proj4rs"] }
 

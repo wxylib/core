@@ -16,6 +16,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use wxy_domain::Domain;
 use wxy_source::{ChunkKey, ChunkSource, Error, Result};
 
@@ -30,7 +32,8 @@ pub type Rings = Vec<Vec<[f64; 2]>>;
 pub type CellCover = ([u64; 2], f64);
 
 /// Which cells a polygon counts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ZoneCells {
     /// Cells whose centre is inside (GDAL's rasterizer).
     #[default]
@@ -253,8 +256,8 @@ impl ZoneStats {
 pub struct ZonePlan {
     shape: Vec<u64>,
     chunk: Vec<u64>,
-    cells: ZoneCells,
-    zones: usize,
+    pub(crate) cells: ZoneCells,
+    pub(crate) zones: usize,
     /// Per spatial chunk `[row, col]`: (zone, span clipped to the chunk).
     by_chunk: BTreeMap<[u64; 2], Vec<(u32, Span)>>,
 }
