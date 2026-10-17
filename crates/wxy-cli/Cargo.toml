@@ -20,7 +20,8 @@ wxy-zarr = { path = "../wxy-zarr" }
 wxy-warp = { path = "../wxy-warp" }
 clap = { version = "4", features = ["derive"] }
 tokio.workspace = true
-serde_json = "1"
+# float_roundtrip: GeoJSON coordinates parsed to the nearest double
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
 serde_json = "1"

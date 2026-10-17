@@ -716,3 +716,114 @@ fn points_reads_what_gdal_reads() {
         }
     }
 }
+
+/// `wxy zonal`: GeoJSON polygons in, one CSV row per feature and band out,
+/// over the cells GDAL's rasterizer burns for each polygon (fixtures
+/// polygons/), with and without --all-touched.
+#[tokio::test]
+async fn zonal_summarises_the_cells_gdal_burns() {
+    let root = fixtures();
+    let dir = root.join("polygons");
+    if !dir.join("manifest.json").exists() {
+        eprintln!("skipping: no polygon fixtures at {}", dir.display());
+        return;
+    }
+    let name = "utm-u16-lzw-pred2-3band-native";
+    let read = |s: &str| std::fs::read(dir.join(format!("{name}-{s}"))).unwrap();
+    let coords: Vec<f64> = read("coords.bin")
+        .chunks_exact(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let rings: Vec<Vec<usize>> = serde_json::from_slice(&read("rings.json")).unwrap();
+    let cells: Value = serde_json::from_slice(&read("cells.json")).unwrap();
+    // GeoJSON with every coordinate written to round trip
+    let mut at = 0;
+    let mut features = Vec::new();
+    for (k, p) in rings.iter().enumerate() {
+        let mut rs = Vec::new();
+        for &n in p {
+            let pts: Vec<String> = (0..n)
+                .map(|i| format!("[{},{}]", coords[2 * (at + i)], coords[2 * (at + i) + 1]))
+                .collect();
+            rs.push(format!("[{}]", pts.join(",")));
+            at += n;
+        }
+        features.push(format!(
+            r#"{{"type":"Feature","id":"p{k}","geometry":{{"type":"Polygon","coordinates":[{}]}}}}"#,
+            rs.join(",")
+        ));
+    }
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let gj = tmp.join("zonal.geojson");
+    std::fs::write(
+        &gj,
+        format!(
+            r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+            features.join(",")
+        ),
+    )
+    .unwrap();
+
+    let tif = root.join("cog/utm-u16-lzw-pred2-3band.tif");
+    let ds = wxy_tiff::open_path(&tif).await.unwrap();
+    let shape = ds.collection.domains[0].shape();
+    let (h, w) = (shape[1], shape[2]);
+    let all = read_window(&ds.levels[0], &Window::new(vec![0; 3], shape.clone()))
+        .await
+        .unwrap()
+        .values
+        .to_f64();
+    for (mode, flag) in [("centre", None), ("all_touched", Some("--all-touched"))] {
+        let out = Command::new(env!("CARGO_BIN_EXE_wxy"))
+            .arg("zonal")
+            .arg(&tif)
+            .arg(&gj)
+            .args(["--crs", "EPSG:32755"])
+            .args(flag)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(
+            lines.next(),
+            Some("feature,band,cells,count,sum,mean,min,max")
+        );
+        let rows: Vec<Vec<String>> = lines
+            .map(|l| l.split(',').map(String::from).collect())
+            .collect();
+        assert_eq!(rows.len(), rings.len() * 3);
+        for (k, runs) in cells[mode].as_array().unwrap().iter().enumerate() {
+            let idx: Vec<u64> = runs
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|r| {
+                    let (s, n) = (r[0].as_u64().unwrap(), r[1].as_u64().unwrap());
+                    s..s + n
+                })
+                .collect();
+            for b in 0..3u64 {
+                let row = &rows[k * 3 + b as usize];
+                assert_eq!(row[0], format!("p{k}"));
+                assert_eq!(row[1], b.to_string());
+                assert_eq!(row[2], idx.len().to_string(), "{mode} p{k}");
+                let v: Vec<f64> = idx.iter().map(|&i| all[(b * h * w + i) as usize]).collect();
+                assert_eq!(row[3], v.len().to_string(), "{mode} p{k}");
+                if v.is_empty() {
+                    continue;
+                }
+                let sum: f64 = v.iter().sum();
+                assert_eq!(row[4].parse::<f64>().unwrap(), sum, "{mode} p{k} band {b}");
+                let min = v.iter().copied().fold(f64::INFINITY, f64::min);
+                let max = v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                assert_eq!(row[6].parse::<f64>().unwrap(), min);
+                assert_eq!(row[7].parse::<f64>().unwrap(), max);
+            }
+        }
+    }
+}

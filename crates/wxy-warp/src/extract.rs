@@ -502,3 +502,66 @@ fn put(out: &mut Values, t: usize, from: &Values, s: usize) -> Result<()> {
     each!(U8, U16, U32, U64, I8, I16, I32, I64, F32, F64);
     Ok(())
 }
+
+/// The cells of a source each polygon covers, as GDAL's rasterizer burns
+/// them for that polygon alone: a cell whose centre is inside, or with
+/// `all_touched` any cell the polygon touches. A polygon is its rings,
+/// exterior first, each closed, in `crs`; vertices go to the source one
+/// by one (no densifying), as gdal_rasterize reprojects them. Cells are
+/// `(row, col)`, sorted.
+pub fn polygon_cells(
+    domain: &Domain,
+    crs: &str,
+    polygons: &[Vec<Vec<[f64; 2]>>],
+    all_touched: bool,
+) -> Result<Vec<Vec<[u64; 2]>>> {
+    let src = SourceGrid::from_domain(domain)?;
+    let points = GridSpec {
+        crs: crs.into(),
+        geotransform: IDENTITY,
+        size: [1, 1],
+    };
+    let opts = WarpOptions {
+        resampling: ResampleAlg::NearestNeighbour,
+        error_threshold: 0.0,
+        wrap_globe: false,
+        ..Default::default()
+    };
+    let t = transformer(&src, &points, &opts)?;
+    let (h, w) = (src.shape[src.y_dim] as i32, src.shape[src.x_dim] as i32);
+    let mut out = Vec::with_capacity(polygons.len());
+    for rings in polygons {
+        // rings wound clockwise (in their own CRS), as GDAL collects them
+        let (mut x, mut y, mut parts) = (Vec::new(), Vec::new(), Vec::new());
+        for r in rings.iter().filter(|r| !r.is_empty()) {
+            let cw = crate::rasterize::is_clockwise(r);
+            let mut push = |p: &[f64; 2]| {
+                x.push(p[0]);
+                y.push(p[1]);
+            };
+            if cw {
+                r.iter().for_each(&mut push);
+            } else {
+                r.iter().rev().for_each(&mut push);
+            }
+            parts.push(r.len());
+        }
+        let mut cells = Vec::new();
+        if !parts.is_empty() {
+            rwarp::Transformer::transform(&t, true, &mut x, &mut y);
+            if all_touched {
+                crate::rasterize::line_all_touched(w, h, &parts, &x, &y, &mut cells);
+            }
+            crate::rasterize::filled_polygon(w, h, &parts, &x, &y, &mut cells);
+        }
+        cells.sort_unstable();
+        cells.dedup();
+        out.push(
+            cells
+                .into_iter()
+                .map(|(r, c)| [r as u64, c as u64])
+                .collect(),
+        );
+    }
+    Ok(out)
+}

@@ -3,6 +3,7 @@
 //! ```sh
 //! wxy warp in.tif out.zarr --crs EPSG:3031 --extent -4e6 -4e6 4e6 4e6 --size 145 145
 //! wxy points in.tif --crs EPSG:4326 < lonlat.csv > values.csv
+//! wxy zonal in.tif zones.geojson > stats.csv
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -26,6 +27,30 @@ enum Command {
     /// Read a GeoTIFF or Zarr array at points (x,y lines on stdin), each
     /// chunk fetched once; values go to stdout as CSV.
     Points(Points),
+    /// Summarise a GeoTIFF or Zarr array over GeoJSON polygons (the cells
+    /// GDAL's rasterizer would burn); statistics go to stdout as CSV.
+    Zonal(Zonal),
+}
+
+#[derive(Parser)]
+struct Zonal {
+    /// Source: a GeoTIFF file, or a Zarr store directory.
+    source: PathBuf,
+    /// GeoJSON: a FeatureCollection, a Feature, or a bare geometry, of
+    /// Polygon or MultiPolygon.
+    polygons: PathBuf,
+    /// CRS of the polygons (GeoJSON's is lon/lat).
+    #[arg(long, default_value = "EPSG:4326")]
+    crs: String,
+    /// Every cell a polygon touches, not only those whose centre it covers.
+    #[arg(long)]
+    all_touched: bool,
+    /// Array to read in a Zarr source.
+    #[arg(long, default_value = "/data")]
+    source_array: String,
+    /// Place a curvilinear Zarr source by its CF cell bounds.
+    #[arg(long)]
+    bounds: bool,
 }
 
 #[derive(Parser)]
@@ -259,6 +284,153 @@ async fn points(p: Points) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Rings of `[x, y]`, exterior first.
+type Polygon = Vec<Vec<[f64; 2]>>;
+
+/// A feature's id and polygons.
+type Feature = (String, Vec<Polygon>);
+
+/// Polygons (rings of `[x, y]`) of each GeoJSON feature, and its id.
+fn geojson_polygons(v: &serde_json::Value) -> Result<Vec<Feature>, Failure> {
+    let ring = |r: &serde_json::Value| -> Result<Vec<[f64; 2]>, Failure> {
+        r.as_array()
+            .ok_or("GeoJSON ring is not an array")?
+            .iter()
+            .map(|p| {
+                match (
+                    p.get(0).and_then(|v| v.as_f64()),
+                    p.get(1).and_then(|v| v.as_f64()),
+                ) {
+                    (Some(x), Some(y)) => Ok([x, y]),
+                    _ => Err("GeoJSON position is not [x, y]".into()),
+                }
+            })
+            .collect()
+    };
+    let polygon = |c: &serde_json::Value| -> Result<Polygon, Failure> {
+        c.as_array()
+            .ok_or("GeoJSON polygon is not an array of rings")?
+            .iter()
+            .map(ring)
+            .collect()
+    };
+    let geometry = |g: &serde_json::Value| -> Result<Vec<Polygon>, Failure> {
+        let c = &g["coordinates"];
+        match g["type"].as_str() {
+            Some("Polygon") => Ok(vec![polygon(c)?]),
+            Some("MultiPolygon") => c
+                .as_array()
+                .ok_or("GeoJSON MultiPolygon is not an array")?
+                .iter()
+                .map(polygon)
+                .collect(),
+            other => {
+                Err(format!("GeoJSON geometry {other:?}: Polygon or MultiPolygon only").into())
+            }
+        }
+    };
+    let feature = |i: usize, f: &serde_json::Value| -> Result<Feature, Failure> {
+        let id = match &f["id"] {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => i.to_string(),
+        };
+        Ok((id, geometry(&f["geometry"])?))
+    };
+    match v["type"].as_str() {
+        Some("FeatureCollection") => v["features"]
+            .as_array()
+            .ok_or("GeoJSON features is not an array")?
+            .iter()
+            .enumerate()
+            .map(|(i, f)| feature(i, f))
+            .collect(),
+        Some("Feature") => Ok(vec![feature(0, v)?]),
+        _ => Ok(vec![("0".into(), geometry(v)?)]),
+    }
+}
+
+async fn zonal(z: Zonal) -> Result<(), Failure> {
+    use std::io::Write;
+    wxy_warp::check_crs(&z.crs)?;
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&z.polygons)?)?;
+    let features = geojson_polygons(&json)?;
+    let mut src = open(&z.source, &z.source_array).await?;
+    if z.bounds {
+        use_bounds(&mut src.domains[0])?;
+    }
+    let (level, domain) = (&*src.levels[0], &src.domains[0]);
+
+    // each feature's cells (the union of its polygons'), then every cell
+    // read once per chunk as cell-centre points
+    let mut cells: Vec<Vec<[u64; 2]>> = Vec::with_capacity(features.len());
+    for (_, polys) in &features {
+        let mut c: Vec<[u64; 2]> = wxy_warp::polygon_cells(domain, &z.crs, polys, z.all_touched)?
+            .into_iter()
+            .flatten()
+            .collect();
+        c.sort_unstable();
+        c.dedup();
+        cells.push(c);
+    }
+    let (px, py): (Vec<f64>, Vec<f64>) = cells
+        .iter()
+        .flatten()
+        .map(|&[r, c]| (c as f64 + 0.5, r as f64 + 0.5))
+        .unzip();
+    let options = wxy_warp::PointOptions {
+        method: wxy_warp::PointMethod::Nearest,
+        wrap_globe: false,
+    };
+    let plan = wxy_warp::plan_pixels(domain, &level.grid().chunk, &px, &py, &options)?;
+    let got = wxy_warp::extract_points(level, &plan, src.nodata).await?;
+    let values = got.values.to_f64();
+
+    let lead = got.leading.len();
+    let n = px.len();
+    let n_lead = got.leading.iter().product::<u64>() as usize;
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    let mut header = vec!["feature".to_string()];
+    header.extend(domain.dims[..lead].iter().map(|d| d.name.clone()));
+    header.extend(["cells", "count", "sum", "mean", "min", "max"].map(String::from));
+    writeln!(out, "{}", header.join(","))?;
+    let mut start = 0;
+    for ((id, _), c) in features.iter().zip(&cells) {
+        for l in 0..n_lead {
+            let vals = values[l * n + start..l * n + start + c.len()]
+                .iter()
+                .copied()
+                .filter(|v| !v.is_nan() && src.nodata != Some(*v));
+            let (mut count, mut sum, mut min, mut max) =
+                (0u64, 0.0, f64::INFINITY, f64::NEG_INFINITY);
+            for v in vals {
+                count += 1;
+                sum += v;
+                min = min.min(v);
+                max = max.max(v);
+            }
+            let mut idx = vec![0u64; lead];
+            let mut rem = l as u64;
+            for d in (0..lead).rev() {
+                idx[d] = rem % got.leading[d];
+                rem /= got.leading[d];
+            }
+            let mut row = vec![id.clone()];
+            row.extend(idx.iter().map(u64::to_string));
+            row.push(c.len().to_string());
+            row.push(count.to_string());
+            if count > 0 {
+                row.extend([sum, sum / count as f64, min, max].map(|v| v.to_string()));
+            } else {
+                row.extend(["", "", "", ""].map(String::from));
+            }
+            writeln!(out, "{}", row.join(","))?;
+        }
+        start += c.len();
+    }
+    Ok(())
+}
+
 async fn warp(w: Warp) -> Result<(), Failure> {
     let existing = w
         .output
@@ -385,6 +557,7 @@ async fn main() -> ExitCode {
     let result = match cli.command {
         Command::Warp(w) => warp(w).await,
         Command::Points(p) => points(p).await,
+        Command::Zonal(z) => zonal(z).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
