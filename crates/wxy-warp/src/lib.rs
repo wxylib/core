@@ -47,8 +47,8 @@ mod geoloc;
 mod rasterize;
 
 pub use extract::{
-    extract_points, plan_pixels, plan_points, polygon_cells, PointMethod, PointOptions, PointPlan,
-    PointValues,
+    extract_points, plan_pixels, plan_points, polygon_cells, polygon_coverage, CellCover,
+    PointMethod, PointOptions, PointPlan, PointValues,
 };
 
 /// A target grid: CRS, GDAL geotransform and size `[ncol, nrow]`.

@@ -565,3 +565,74 @@ pub fn polygon_cells(
     }
     Ok(out)
 }
+
+/// A cell `(row, col)` and the fraction of it a polygon covers.
+pub type CellCover = ([u64; 2], f64);
+
+/// The cells of a source each polygon covers and how much of each it
+/// covers (area of polygon within the cell over the cell's area, in
+/// `(0, 1]`), from controlledburn's exact coverage (exactextract's
+/// algorithm). Polygons are as in [`polygon_cells`]; the fractions are
+/// taken in the source's index space, so they are exact areas for an
+/// affine source and index-space areas for a curvilinear one.
+pub fn polygon_coverage(
+    domain: &Domain,
+    crs: &str,
+    polygons: &[Vec<Vec<[f64; 2]>>],
+) -> Result<Vec<Vec<CellCover>>> {
+    use controlledburn::{burn, BurnOptions, Coord, Geometry, GridSpec as BurnGrid, Polygon};
+    let src = SourceGrid::from_domain(domain)?;
+    let points = GridSpec {
+        crs: crs.into(),
+        geotransform: IDENTITY,
+        size: [1, 1],
+    };
+    let opts = WarpOptions {
+        resampling: ResampleAlg::NearestNeighbour,
+        error_threshold: 0.0,
+        wrap_globe: false,
+        ..Default::default()
+    };
+    let t = transformer(&src, &points, &opts)?;
+    let (h, w) = (src.shape[src.y_dim], src.shape[src.x_dim]);
+    // index space with y up: (pixel, -line) on a grid of unit cells
+    let grid = BurnGrid::new(0.0, -(h as f64), w as f64, 0.0, w as u32, h as u32);
+    // Each ring is burned on its own and holes subtracted: controlledburn
+    // 0.2.1 drops a hole's boundary cells where the exterior covers them
+    // fully (a patch is with hypertidy). Holes of a valid polygon lie
+    // inside its exterior and apart, so the difference is exact.
+    let (mut geoms, mut owner) = (Vec::new(), Vec::new());
+    for (k, rings) in polygons.iter().enumerate() {
+        for (i, r) in rings.iter().enumerate() {
+            let (mut x, mut y): (Vec<f64>, Vec<f64>) = r.iter().map(|p| (p[0], p[1])).unzip();
+            rwarp::Transformer::transform(&t, true, &mut x, &mut y);
+            let ring = x.iter().zip(&y).map(|(&x, &y)| Coord::new(x, -y)).collect();
+            geoms.push(Geometry::Polygon(Polygon::new(vec![ring])));
+            owner.push((k, if i == 0 { 1.0 } else { -1.0 }));
+        }
+    }
+    let r = burn(&geoms, &grid, BurnOptions::coverage())
+        .map_err(|e| Error::Unsupported(format!("coverage: {e}")))?;
+    let mut acc: Vec<BTreeMap<[u64; 2], f64>> = vec![BTreeMap::new(); polygons.len()];
+    let mut add = |id: i32, cell: [u64; 2], f: f64| {
+        let (k, sign) = owner[id as usize];
+        *acc[k].entry(cell).or_insert(0.0) += sign * f;
+    };
+    for run in &r.runs {
+        for c in run.col_start..run.col_end {
+            add(run.id, [run.row as u64, c as u64], 1.0);
+        }
+    }
+    for e in &r.edges {
+        add(e.id, [e.row as u64, e.col as u64], e.fraction as f64);
+    }
+    Ok(acc
+        .into_iter()
+        .map(|m| {
+            m.into_iter()
+                .filter(|&(_, f)| f > 1e-6)
+                .map(|(c, f)| (c, f.min(1.0)))
+                .collect()
+        })
+        .collect())
+}

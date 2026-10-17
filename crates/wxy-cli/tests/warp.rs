@@ -826,4 +826,68 @@ async fn zonal_summarises_the_cells_gdal_burns() {
             }
         }
     }
+
+    // --coverage: polygons inside the grid count their own area, in cells
+    let out = Command::new(env!("CARGO_BIN_EXE_wxy"))
+        .arg("zonal")
+        .arg(&tif)
+        .arg(&gj)
+        .args(["--crs", "EPSG:32755", "--coverage"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let rows: Vec<Vec<String>> = text
+        .lines()
+        .skip(1)
+        .map(|l| l.split(',').map(String::from).collect())
+        .collect();
+    let gt = match &ds.collection.domains[0].primary_for(2).unwrap().positions {
+        wxy_domain::Positions::Affine(a) => a.0,
+        _ => unreachable!(),
+    };
+    let mut at = 0;
+    let mut checked = 0;
+    for (k, p) in rings.iter().enumerate() {
+        let ring = |n: usize, at: usize| -> Vec<[f64; 2]> {
+            (0..n)
+                .map(|i| [coords[2 * (at + i)], coords[2 * (at + i) + 1]])
+                .collect()
+        };
+        let rs: Vec<Vec<[f64; 2]>> = p
+            .iter()
+            .map(|&n| {
+                let r = ring(n, at);
+                at += n;
+                r
+            })
+            .collect();
+        let inside = rs.iter().flatten().all(|v| {
+            let (c, r) = ((v[0] - gt[0]) / gt[1], (v[1] - gt[3]) / gt[5]);
+            c >= 0.0 && c <= w as f64 && r >= 0.0 && r <= h as f64
+        });
+        if !inside {
+            continue;
+        }
+        let shoelace = |r: &Vec<[f64; 2]>| {
+            r.windows(2)
+                .map(|s| s[0][0] * s[1][1] - s[1][0] * s[0][1])
+                .sum::<f64>()
+                .abs()
+                / 2.0
+        };
+        let area = shoelace(&rs[0]) - rs[1..].iter().map(shoelace).sum::<f64>();
+        let want = area / (gt[1] * gt[5]).abs();
+        let got: f64 = rows[k * 3][3].parse().unwrap();
+        assert!(
+            (got - want).abs() < 1e-4 * want.max(1.0),
+            "p{k}: {got} of {want}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0);
 }

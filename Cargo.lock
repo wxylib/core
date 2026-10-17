@@ -1165,6 +1165,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "controlledburn"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7df902ad895089d47a303c8b75fb3650a8f98b5b8d99af6ee4b77696d787ebd7"
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5126,6 +5132,7 @@ name = "wxy-warp"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "controlledburn",
  "proj4rs",
  "rwarp",
  "serde_json",

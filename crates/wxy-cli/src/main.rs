@@ -43,8 +43,13 @@ struct Zonal {
     #[arg(long, default_value = "EPSG:4326")]
     crs: String,
     /// Every cell a polygon touches, not only those whose centre it covers.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "coverage")]
     all_touched: bool,
+    /// Weight each cell by the fraction of it a polygon covers (exact
+    /// coverage, as exactextract): count is the covered cells' sum of
+    /// fractions, sum the fraction-weighted sum.
+    #[arg(long)]
+    coverage: bool,
     /// Array to read in a Zarr source.
     #[arg(long, default_value = "/data")]
     source_array: String,
@@ -361,17 +366,40 @@ async fn zonal(z: Zonal) -> Result<(), Failure> {
     }
     let (level, domain) = (&*src.levels[0], &src.domains[0]);
 
-    // each feature's cells (the union of its polygons'), then every cell
-    // read once per chunk as cell-centre points
+    // each feature's cells (the union of its polygons') and their
+    // weights, then every cell read once per chunk as cell-centre points
     let mut cells: Vec<Vec<[u64; 2]>> = Vec::with_capacity(features.len());
+    let mut weights: Vec<Vec<f64>> = Vec::with_capacity(features.len());
     for (_, polys) in &features {
-        let mut c: Vec<[u64; 2]> = wxy_warp::polygon_cells(domain, &z.crs, polys, z.all_touched)?
-            .into_iter()
-            .flatten()
-            .collect();
-        c.sort_unstable();
-        c.dedup();
-        cells.push(c);
+        let mut c: Vec<([u64; 2], f64)> = if z.coverage {
+            wxy_warp::polygon_coverage(domain, &z.crs, polys)?
+                .into_iter()
+                .flatten()
+                .collect()
+        } else {
+            wxy_warp::polygon_cells(domain, &z.crs, polys, z.all_touched)?
+                .into_iter()
+                .flatten()
+                .map(|c| (c, 1.0))
+                .collect()
+        };
+        c.sort_by_key(|a| a.0);
+        let mut merged: Vec<([u64; 2], f64)> = Vec::with_capacity(c.len());
+        for (cell, f) in c {
+            match merged.last_mut() {
+                Some(last) if last.0 == cell => {
+                    // parts of a multipolygon: their cover adds, to a whole cell
+                    last.1 = if z.coverage {
+                        (last.1 + f).min(1.0)
+                    } else {
+                        1.0
+                    };
+                }
+                _ => merged.push((cell, f)),
+            }
+        }
+        cells.push(merged.iter().map(|c| c.0).collect());
+        weights.push(merged.iter().map(|c| c.1).collect());
     }
     let (px, py): (Vec<f64>, Vec<f64>) = cells
         .iter()
@@ -395,17 +423,18 @@ async fn zonal(z: Zonal) -> Result<(), Failure> {
     header.extend(["cells", "count", "sum", "mean", "min", "max"].map(String::from));
     writeln!(out, "{}", header.join(","))?;
     let mut start = 0;
-    for ((id, _), c) in features.iter().zip(&cells) {
+    for (((id, _), c), wt) in features.iter().zip(&cells).zip(&weights) {
         for l in 0..n_lead {
             let vals = values[l * n + start..l * n + start + c.len()]
                 .iter()
-                .copied()
-                .filter(|v| !v.is_nan() && src.nodata != Some(*v));
+                .zip(wt)
+                .filter(|(v, _)| !v.is_nan() && src.nodata != Some(**v));
+            // count and sum weighted by cover (1 for whole cells)
             let (mut count, mut sum, mut min, mut max) =
-                (0u64, 0.0, f64::INFINITY, f64::NEG_INFINITY);
-            for v in vals {
-                count += 1;
-                sum += v;
+                (0.0, 0.0, f64::INFINITY, f64::NEG_INFINITY);
+            for (&v, &f) in vals {
+                count += f;
+                sum += v * f;
                 min = min.min(v);
                 max = max.max(v);
             }
@@ -419,8 +448,8 @@ async fn zonal(z: Zonal) -> Result<(), Failure> {
             row.extend(idx.iter().map(u64::to_string));
             row.push(c.len().to_string());
             row.push(count.to_string());
-            if count > 0 {
-                row.extend([sum, sum / count as f64, min, max].map(|v| v.to_string()));
+            if count > 0.0 {
+                row.extend([sum, sum / count, min, max].map(|v| v.to_string()));
             } else {
                 row.extend(["", "", "", ""].map(String::from));
             }

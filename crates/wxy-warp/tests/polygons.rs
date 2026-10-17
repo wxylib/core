@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use serde_json::Value;
-use wxy_warp::polygon_cells;
+use wxy_warp::{polygon_cells, polygon_coverage};
 
 fn fixtures() -> PathBuf {
     std::env::var("WXY_FIXTURES")
@@ -75,6 +75,52 @@ async fn polygon_cells_match_gdal() {
                     bad += 1;
                 }
             }
+        }
+        // exact coverage: every cell GDAL burns by centre is covered, and
+        // a polygon inside the grid covers its own area, in cells
+        let cover = polygon_coverage(domain, crs, &polygons).unwrap();
+        let centre = polygon_cells(domain, crs, &polygons, false).unwrap();
+        let gt = match &domain.primary_for(1).unwrap().positions {
+            wxy_domain::Positions::Affine(a) => a.0,
+            _ => unreachable!(),
+        };
+        let h = domain.shape()[domain.shape().len() - 2] as f64;
+        for (k, p) in polygons.iter().enumerate() {
+            let covered: std::collections::HashSet<[u64; 2]> =
+                cover[k].iter().map(|c| c.0).collect();
+            assert!(
+                centre[k].iter().all(|c| covered.contains(c)),
+                "{name} polygon {k}: a centre cell not covered ({} of {}, cover {})",
+                centre[k].iter().filter(|c| !covered.contains(*c)).count(),
+                centre[k].len(),
+                cover[k].len()
+            );
+            assert!(cover[k].iter().all(|c| c.1 > 0.0 && c.1 <= 1.0));
+            if crs == "EPSG:4326" && !name.starts_with("world") {
+                continue;
+            }
+            let inside = p.iter().flatten().all(|v| {
+                let col = (v[0] - gt[0]) / gt[1];
+                let row = (v[1] - gt[3]) / gt[5];
+                col >= 0.0 && col <= w as f64 && row >= 0.0 && row <= h
+            });
+            if !inside {
+                continue;
+            }
+            let shoelace = |r: &Vec<[f64; 2]>| {
+                r.windows(2)
+                    .map(|s| s[0][0] * s[1][1] - s[1][0] * s[0][1])
+                    .sum::<f64>()
+                    .abs()
+                    / 2.0
+            };
+            let area = shoelace(&p[0]) - p[1..].iter().map(shoelace).sum::<f64>();
+            let cells = area / (gt[1] * gt[5]).abs();
+            let got: f64 = cover[k].iter().map(|c| c.1).sum();
+            assert!(
+                (got - cells).abs() < 1e-4 * cells.max(1.0),
+                "{name} polygon {k}: covers {got} cells, area is {cells}"
+            );
         }
         eprintln!("{name}: {} polygons", polygons.len());
     }
