@@ -5125,6 +5125,7 @@ dependencies = [
 name = "wxy-warp"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "proj4rs",
  "rwarp",
  "serde_json",

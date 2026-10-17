@@ -9,7 +9,7 @@
 //!    compute the source window the target needs ([`plan`]);
 //! 2. **read**: read that window from any [`ChunkSource`] (COG, Zarr,
 //!    virtual Zarr);
-//! 3. **warp**: resample with rwarp's kernel, all bands in one pass.
+//! 3. **warp**: resample with rwarp's kernel, one slice (band) at a time.
 //!
 //! By default (stage S5, [`WarpOptions::chunked`]) nearest, bilinear and
 //! cubic warps run as GDAL's warp operation does instead: chunk by chunk,
@@ -17,6 +17,12 @@
 //! (wxy-resample), so that a target coarser than the source is smoothed as
 //! GDAL smooths it and the output matches GDAL's cell for cell. The steps
 //! above remain as the plain route.
+//!
+//! Any dims before y and x (time, depth, band) are leading dims (stage
+//! S4b): [`WarpPlan`] plans once from the spatial dims and warps the
+//! leading slices in batches of whole source chunks, so a 4D store
+//! streams through without being loaded, each slice warped as its own 2D
+//! warp would be.
 //!
 //! Stage S4 warps domains whose spatial dims carry an affine mapping in a
 //! CRS frame. CRS work uses rwarp's pure-Rust `proj4rs` backend (EPSG
@@ -107,7 +113,8 @@ impl Default for WarpOptions {
 }
 
 /// Where a source domain sits: its CRS, geotransform, and which dims are
-/// y and x (any other dim is a band dim, read whole).
+/// y and x (the last two; any dims before them are leading dims, warped
+/// slice by slice).
 #[derive(Debug, Clone)]
 pub struct SourceGrid {
     pub crs: String,
@@ -118,12 +125,11 @@ pub struct SourceGrid {
 }
 
 impl SourceGrid {
-    /// The primary affine mapping of `domain`. Domains of rank 2, or rank 3
-    /// with one leading band dim.
+    /// The primary affine mapping of `domain`, of rank 2 or more.
     pub fn from_domain(domain: &Domain) -> Result<Self> {
         let shape = domain.shape();
-        if !(shape.len() == 2 || shape.len() == 3) {
-            return Err(Error::Unsupported("warp needs a 2D or 3D domain".into()));
+        if shape.len() < 2 {
+            return Err(Error::Unsupported("warp needs y and x dims".into()));
         }
         let x = shape.len() - 1;
         let m = domain
@@ -176,14 +182,6 @@ impl SourceGrid {
         let (top, bottom) = (g[3], g[3] + g[5] * h);
         let poles = near(top.max(bottom), 90.0, g[5]) && near(top.min(bottom), -90.0, g[5]);
         Ok(Some((w, poles.then_some(h))))
-    }
-
-    fn bands(&self) -> u64 {
-        if self.shape.len() == 3 {
-            self.shape[0]
-        } else {
-            1
-        }
     }
 }
 
@@ -406,9 +404,11 @@ pub fn plan(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<Opti
     Ok(Some(w))
 }
 
-/// Warp `source` (whose index space is `domain`) to `dst`. The result is
-/// `(band, y, x)` (or `(y, x)` for a 2D domain), filled with nodata (or
-/// zero) where nothing maps.
+/// Warp `source` (whose index space is `domain`) to `dst`. The result has
+/// the source's leading dims, then `(y, x)`: `(y, x)` for a 2D domain,
+/// `(band, y, x)` for a 3D one, and so on. It is filled with nodata (or
+/// zero) where nothing maps. Every slice is read and warped in one go; to
+/// stream a large store slice by slice, use [`WarpPlan`].
 pub async fn warp<S: ChunkSource + ?Sized>(
     source: &S,
     domain: &Domain,
@@ -416,85 +416,315 @@ pub async fn warp<S: ChunkSource + ?Sized>(
     opts: &WarpOptions,
     nodata: Option<f64>,
 ) -> Result<Buffer> {
-    let src = SourceGrid::from_domain(domain)?;
-    let nodata = opts.nodata.or(nodata);
-    let (ncol, nrow) = (dst.size[0], dst.size[1]);
-    let bands = src.bands();
-    let out_shape: Vec<u64> = if src.shape.len() == 3 {
-        vec![bands, nrow as u64, ncol as u64]
-    } else {
-        vec![nrow as u64, ncol as u64]
-    };
-    let out_window = Window::new(vec![0; out_shape.len()], out_shape.clone());
-    if opts.chunked {
-        if let Some(method) = method(opts.resampling) {
-            return warp_chunked(source, &src, dst, opts, nodata, method, out_window).await;
+    let plan = WarpPlan::new(domain, source.dtype(), dst, opts, nodata)?;
+    let lead = plan.leading().to_vec();
+    plan.warp_slices(source, &Window::new(vec![0; lead.len()], lead))
+        .await
+}
+
+/// Memory a batch of [`WarpPlan::batches`] aims to stay under by default:
+/// the source region and the target, over all slices in the batch.
+pub const BATCH_BYTES: u64 = 256 << 20;
+
+/// A warp planned once and applied to every slice of the source's leading
+/// (non-spatial) dims (stage S4b): a time x depth x y x x store warps one
+/// batch of slices at a time, each slice as the 2D warp of that slice.
+///
+/// Planning (the transformer, GDAL's chunks and source windows, or the
+/// plain route's source window) depends only on the spatial dims, so it is
+/// done once; each batch reads the same spatial region across its slices.
+#[derive(Debug, Clone)]
+pub struct WarpPlan {
+    src: SourceGrid,
+    dst: GridSpec,
+    opts: WarpOptions,
+    nodata: Option<f64>,
+    dtype: wxy_domain::DataType,
+    route: Route,
+}
+
+#[derive(Debug, Clone)]
+enum Route {
+    /// The target does not see the source.
+    Empty,
+    /// GDAL's chunked warp (S5), over source region `(offset, size)`.
+    Chunked {
+        method: wxy_resample::Method,
+        chunks: Vec<chunked::Chunk>,
+        region: ([i32; 2], [i32; 2]),
+    },
+    /// rwarp in one pass, over this source window.
+    Plain(SourceWindow),
+}
+
+impl WarpPlan {
+    /// Plan the warp of a source of `dtype` over `domain` to `dst`.
+    pub fn new(
+        domain: &Domain,
+        dtype: wxy_domain::DataType,
+        dst: &GridSpec,
+        opts: &WarpOptions,
+        nodata: Option<f64>,
+    ) -> Result<Self> {
+        let src = SourceGrid::from_domain(domain)?;
+        let nodata = opts.nodata.or(nodata);
+        let route = match method(opts.resampling).filter(|_| opts.chunked) {
+            Some(method) => {
+                let bits = 8 * dtype
+                    .size()
+                    .ok_or_else(|| Error::Unsupported(format!("warping {dtype:?}")))?;
+                let t = transformer(&src, dst, opts)?;
+                let special = special_points(&src, &t);
+                let chunks = chunked::Planner::new(
+                    &t,
+                    src.size(),
+                    [dst.size[0] as i32, dst.size[1] as i32],
+                    method,
+                    special,
+                    src.globe()?,
+                    bits,
+                    nodata.is_some(),
+                )
+                .chunks();
+                let live: Vec<&chunked::Chunk> = chunks.iter().filter(|c| !c.is_empty()).collect();
+                if live.is_empty() {
+                    Route::Empty
+                } else {
+                    let lo = |i: usize| live.iter().map(|c| c.src_off[i]).min().unwrap();
+                    let hi = |i: usize| {
+                        live.iter()
+                            .map(|c| c.src_off[i] + c.src_size[i])
+                            .max()
+                            .unwrap()
+                    };
+                    let (x0, y0) = (lo(0), lo(1));
+                    let region = ([x0, y0], [hi(0) - x0, hi(1) - y0]);
+                    drop(live);
+                    Route::Chunked {
+                        method,
+                        chunks,
+                        region,
+                    }
+                }
+            }
+            None => match plan(&src, dst, opts)? {
+                Some(w) => Route::Plain(w),
+                None => Route::Empty,
+            },
+        };
+        Ok(Self {
+            src,
+            dst: dst.clone(),
+            opts: *opts,
+            nodata,
+            dtype,
+            route,
+        })
+    }
+
+    /// The shape of the source's leading dims (empty for a 2D source).
+    pub fn leading(&self) -> &[u64] {
+        &self.src.shape[..self.src.y_dim]
+    }
+
+    /// The source region every slice reads, as `(offset, size)` over
+    /// `(y, x)`, or `None` when the target does not see the source.
+    pub fn region(&self) -> Option<([u64; 2], [u64; 2])> {
+        let (off, size) = match &self.route {
+            Route::Empty => return None,
+            Route::Chunked { region, .. } => *region,
+            Route::Plain(w) => ([w.xoff, w.yoff], [w.xsize, w.ysize]),
+        };
+        Some((
+            [off[1] as u64, off[0] as u64],
+            [size[1] as u64, size[0] as u64],
+        ))
+    }
+
+    /// Windows over the leading dims, in C order, that together cover
+    /// them once. Each batch spans whole source chunks along the leading
+    /// dims (`chunk` is the source's chunk shape, all dims), so a chunk
+    /// holding several slices is read once, unless that would take the
+    /// batch's source region and target over `max_bytes`; then the batch
+    /// is halved along its longest dim until it fits (down to one slice).
+    pub fn batches(&self, chunk: &[u64], max_bytes: u64) -> Vec<Window> {
+        let lead = self.leading();
+        let item = self.dtype.size().unwrap_or(8) as u64;
+        let region = self.region().map_or(0, |(_, s)| s[0] * s[1]);
+        let per_slice = item * (region + (self.dst.size[0] * self.dst.size[1]) as u64);
+        let mut block: Vec<u64> = lead
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| chunk.get(i).copied().unwrap_or(1).clamp(1, n.max(1)))
+            .collect();
+        while block.iter().product::<u64>() * per_slice > max_bytes {
+            let (i, &b) = block
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, &b)| b)
+                .unwrap_or((0, &1));
+            if b <= 1 {
+                break;
+            }
+            block[i] = b.div_ceil(2);
+        }
+        let counts: Vec<u64> = lead
+            .iter()
+            .zip(&block)
+            .map(|(&n, &b)| n.div_ceil(b))
+            .collect();
+        if counts.contains(&0) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut idx = vec![0u64; lead.len()];
+        loop {
+            let offset: Vec<u64> = idx.iter().zip(&block).map(|(i, b)| i * b).collect();
+            let size = offset
+                .iter()
+                .zip(&block)
+                .zip(lead)
+                .map(|((o, b), n)| (*b).min(n - o))
+                .collect();
+            out.push(Window::new(offset, size));
+            let mut d = lead.len();
+            loop {
+                if d == 0 {
+                    return out;
+                }
+                d -= 1;
+                idx[d] += 1;
+                if idx[d] < counts[d] {
+                    break;
+                }
+                idx[d] = 0;
+            }
         }
     }
 
-    // The transformer is not Send (PROJ handles), so it is rebuilt after
-    // the read rather than held across it.
-    let Some(sw) = plan(&src, dst, opts)? else {
-        let n = (bands as usize) * ncol * nrow;
-        return Ok(Buffer {
+    /// Read and warp the slices in `lead` (a window over the leading
+    /// dims; rank 0 for a 2D source). The result's window is `lead`
+    /// followed by the whole target `(y, x)`.
+    pub async fn warp_slices<S: ChunkSource + ?Sized>(
+        &self,
+        source: &S,
+        lead: &Window,
+    ) -> Result<Buffer> {
+        let (ncol, nrow) = (self.dst.size[0], self.dst.size[1]);
+        if lead.offset.len() != self.leading().len() {
+            return Err(Error::Unsupported(format!(
+                "a window over {} leading dims, not {}",
+                self.leading().len(),
+                lead.offset.len()
+            )));
+        }
+        let n_slices = lead.len() as usize;
+        let mut offset = lead.offset.clone();
+        let mut size = lead.size.clone();
+        offset.extend([0, 0]);
+        size.extend([nrow as u64, ncol as u64]);
+        let out_window = Window::new(offset, size);
+        let nodata = self.nodata;
+        let Some(([y0, x0], [ys, xs])) = self.region() else {
+            return Ok(Buffer {
+                window: out_window,
+                values: fill(self.dtype, n_slices * ncol * nrow, nodata)?,
+            });
+        };
+        let mut read_off = lead.offset.clone();
+        let mut read_size = lead.size.clone();
+        read_off.extend([y0, x0]);
+        read_size.extend([ys, xs]);
+        let buf = read_window(source, &Window::new(read_off, read_size)).await?;
+
+        // The transformer is not Send (PROJ handles), so it is rebuilt
+        // after the read rather than held across it.
+        let t = transformer(&self.src, &self.dst, &self.opts)?;
+        let (n_src, n_dst) = ((xs * ys) as usize, ncol * nrow);
+        let b = n_slices;
+        let values = match &self.route {
+            Route::Empty => unreachable!("an empty route has no region"),
+            Route::Chunked { method, chunks, .. } => {
+                let origin = [x0 as i32, y0 as i32];
+                let extent = [xs as i32, ys as i32];
+                macro_rules! run {
+                    ($v:expr, $variant:ident, $t:ty) => {{
+                        let init = nodata.map(|n| n as $t).unwrap_or_default();
+                        let mut out = vec![init; b * n_dst];
+                        for k in 0..b {
+                            chunked::warp_band::<$t>(
+                                &t,
+                                chunks,
+                                *method,
+                                &$v[k * n_src..(k + 1) * n_src],
+                                origin,
+                                extent,
+                                &mut out[k * n_dst..(k + 1) * n_dst],
+                                ncol,
+                                nodata,
+                            );
+                        }
+                        Values::$variant(out)
+                    }};
+                }
+                match &buf.values {
+                    Values::U8(v) => run!(v, U8, u8),
+                    Values::I8(v) => run!(v, I8, i8),
+                    Values::U16(v) => run!(v, U16, u16),
+                    Values::I16(v) => run!(v, I16, i16),
+                    Values::U32(v) => run!(v, U32, u32),
+                    Values::I32(v) => run!(v, I32, i32),
+                    Values::U64(v) => run!(v, U64, u64),
+                    Values::I64(v) => run!(v, I64, i64),
+                    Values::F32(v) => run!(v, F32, f32),
+                    Values::F64(v) => run!(v, F64, f64),
+                }
+            }
+            Route::Plain(_) => {
+                let (xs, ys) = (xs as usize, ys as usize);
+                macro_rules! run {
+                    ($v:expr, $variant:ident, $t:ty) => {{
+                        let nd = nodata.map(|n| n as $t);
+                        let mut out = Vec::with_capacity(b * n_dst);
+                        for k in 0..b {
+                            out.extend(warp_resample_t::<$t>(
+                                &t,
+                                &$v[k * n_src..(k + 1) * n_src],
+                                xs,
+                                ys,
+                                1,
+                                x0 as usize,
+                                y0 as usize,
+                                ncol,
+                                nrow,
+                                nd,
+                                None,
+                                self.opts.resampling,
+                            ));
+                        }
+                        Values::$variant(out)
+                    }};
+                }
+                match &buf.values {
+                    Values::U8(v) => run!(v, U8, u8),
+                    Values::I8(v) => run!(v, I8, i8),
+                    Values::U16(v) => run!(v, U16, u16),
+                    Values::I16(v) => run!(v, I16, i16),
+                    Values::U32(v) => run!(v, U32, u32),
+                    Values::I32(v) => run!(v, I32, i32),
+                    Values::F32(v) => run!(v, F32, f32),
+                    Values::F64(v) => run!(v, F64, f64),
+                    Values::U64(_) | Values::I64(_) => {
+                        return Err(Error::Unsupported("warping 64-bit integers".into()))
+                    }
+                }
+            }
+        };
+        Ok(Buffer {
             window: out_window,
-            values: fill(source.dtype(), n, nodata)?,
-        });
-    };
-    let (xoff, yoff, xs, ys) = (
-        sw.xoff as u64,
-        sw.yoff as u64,
-        sw.xsize as u64,
-        sw.ysize as u64,
-    );
-    let read = if src.shape.len() == 3 {
-        Window::new(vec![0, yoff, xoff], vec![bands, ys, xs])
-    } else {
-        Window::new(vec![yoff, xoff], vec![ys, xs])
-    };
-    let buf = read_window(source, &read).await?;
-
-    let t = transformer(&src, dst, opts)?;
-    let b = bands as usize;
-    let (xs, ys) = (xs as usize, ys as usize);
-    macro_rules! run {
-        ($v:expr, $variant:ident, $t:ty) => {{
-            let inter = interleave($v, b, ys * xs);
-            let nd = nodata.map(|n| n as $t);
-            let out = warp_resample_t::<$t>(
-                &t,
-                &inter,
-                xs,
-                ys,
-                b,
-                xoff as usize,
-                yoff as usize,
-                ncol,
-                nrow,
-                nd,
-                None,
-                opts.resampling,
-            );
-            Values::$variant(deinterleave(&out, b, ncol * nrow))
-        }};
+            values,
+        })
     }
-    let values = match &buf.values {
-        Values::U8(v) => run!(v, U8, u8),
-        Values::I8(v) => run!(v, I8, i8),
-        Values::U16(v) => run!(v, U16, u16),
-        Values::I16(v) => run!(v, I16, i16),
-        Values::U32(v) => run!(v, U32, u32),
-        Values::I32(v) => run!(v, I32, i32),
-        Values::F32(v) => run!(v, F32, f32),
-        Values::F64(v) => run!(v, F64, f64),
-        Values::U64(_) | Values::I64(_) => {
-            return Err(Error::Unsupported("warping 64-bit integers".into()))
-        }
-    };
-    Ok(Buffer {
-        window: out_window,
-        values,
-    })
 }
 
 /// The overview [`warp_pyramid`] reads for `dst`: an index into the
@@ -639,134 +869,6 @@ fn special_points(src: &SourceGrid, t: &Approx) -> Vec<(f64, f64)> {
         let mut y = [(g[1] * dy - g[4] * dx) / det];
         if rwarp::Transformer::transform(t, false, &mut x, &mut y)[0] {
             out.push((x[0], y[0]));
-        }
-    }
-    out
-}
-
-/// The chunked warp (S5): GDAL's chunks, windows and kernels. Bands are
-/// warped one at a time, as single-band GDAL warps.
-async fn warp_chunked<S: ChunkSource + ?Sized>(
-    source: &S,
-    src: &SourceGrid,
-    dst: &GridSpec,
-    opts: &WarpOptions,
-    nodata: Option<f64>,
-    method: wxy_resample::Method,
-    out_window: Window,
-) -> Result<Buffer> {
-    let (ncol, nrow) = (dst.size[0], dst.size[1]);
-    let bands = src.bands() as usize;
-    let dtype = source.dtype();
-    let bits = 8 * dtype
-        .size()
-        .ok_or_else(|| Error::Unsupported(format!("warping {dtype:?}")))?;
-    // The transformer is not Send, so it is built again after the read.
-    let chunks = {
-        let t = transformer(src, dst, opts)?;
-        let special = special_points(src, &t);
-        let planner = chunked::Planner::new(
-            &t,
-            src.size(),
-            [ncol as i32, nrow as i32],
-            method,
-            special,
-            src.globe()?,
-            bits,
-            nodata.is_some(),
-        );
-        planner.chunks()
-    };
-    let live: Vec<&chunked::Chunk> = chunks.iter().filter(|c| !c.is_empty()).collect();
-    if live.is_empty() {
-        return Ok(Buffer {
-            window: out_window,
-            values: fill(dtype, bands * ncol * nrow, nodata)?,
-        });
-    }
-    let x0 = live.iter().map(|c| c.src_off[0]).min().unwrap();
-    let y0 = live.iter().map(|c| c.src_off[1]).min().unwrap();
-    let x1 = live
-        .iter()
-        .map(|c| c.src_off[0] + c.src_size[0])
-        .max()
-        .unwrap();
-    let y1 = live
-        .iter()
-        .map(|c| c.src_off[1] + c.src_size[1])
-        .max()
-        .unwrap();
-    let (xs, ys) = ((x1 - x0) as u64, (y1 - y0) as u64);
-    let read = if src.shape.len() == 3 {
-        Window::new(vec![0, y0 as u64, x0 as u64], vec![bands as u64, ys, xs])
-    } else {
-        Window::new(vec![y0 as u64, x0 as u64], vec![ys, xs])
-    };
-    let buf = read_window(source, &read).await?;
-
-    let t = transformer(src, dst, opts)?;
-    let (n_src, n_dst) = ((xs * ys) as usize, ncol * nrow);
-    let region = ([x0, y0], [x1 - x0, y1 - y0]);
-    macro_rules! run {
-        ($v:expr, $variant:ident, $t:ty) => {{
-            let init = nodata.map(|n| n as $t).unwrap_or_default();
-            let mut out = vec![init; bands * n_dst];
-            for b in 0..bands {
-                chunked::warp_band::<$t>(
-                    &t,
-                    &chunks,
-                    method,
-                    &$v[b * n_src..(b + 1) * n_src],
-                    region.0,
-                    region.1,
-                    &mut out[b * n_dst..(b + 1) * n_dst],
-                    ncol,
-                    nodata,
-                );
-            }
-            Values::$variant(out)
-        }};
-    }
-    let values = match &buf.values {
-        Values::U8(v) => run!(v, U8, u8),
-        Values::I8(v) => run!(v, I8, i8),
-        Values::U16(v) => run!(v, U16, u16),
-        Values::I16(v) => run!(v, I16, i16),
-        Values::U32(v) => run!(v, U32, u32),
-        Values::I32(v) => run!(v, I32, i32),
-        Values::U64(v) => run!(v, U64, u64),
-        Values::I64(v) => run!(v, I64, i64),
-        Values::F32(v) => run!(v, F32, f32),
-        Values::F64(v) => run!(v, F64, f64),
-    };
-    Ok(Buffer {
-        window: out_window,
-        values,
-    })
-}
-
-/// Band-major `(band, pixel)` to pixel-interleaved `(pixel, band)`.
-fn interleave<T: Copy>(v: &[T], bands: usize, n: usize) -> Vec<T> {
-    if bands == 1 {
-        return v.to_vec();
-    }
-    let mut out = Vec::with_capacity(v.len());
-    for p in 0..n {
-        for b in 0..bands {
-            out.push(v[b * n + p]);
-        }
-    }
-    out
-}
-
-fn deinterleave<T: Copy>(v: &[T], bands: usize, n: usize) -> Vec<T> {
-    if bands == 1 {
-        return v.to_vec();
-    }
-    let mut out = Vec::with_capacity(v.len());
-    for b in 0..bands {
-        for p in 0..n {
-            out.push(v[p * bands + b]);
         }
     }
     out

@@ -19,6 +19,7 @@ proj4rs = { version = "0.1.10", default-features = false, features = ["crs-defin
 rwarp = { git = "https://github.com/hypertidy/rwarp", rev = "20572c396307f71659508eda0411ee31e9d127c8", default-features = false, features = ["proj4rs"] }
 
 [dev-dependencies]
+async-trait.workspace = true
 tokio.workspace = true
 serde_json = "1"
 wxy-tiff = { path = "../wxy-tiff" }

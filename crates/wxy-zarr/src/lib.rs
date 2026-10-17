@@ -37,7 +37,7 @@ use zarrs::group::Group;
 use zarrs::storage::AsyncReadableStorageTraits;
 
 pub mod write;
-pub use write::{write_path, write_store, GridArray};
+pub use write::{create_path, create_store, write_path, write_store, GridArray, GridWriter};
 
 type Storage = dyn AsyncReadableStorageTraits;
 

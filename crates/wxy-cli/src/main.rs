@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use wxy_source::ChunkSource;
-use wxy_warp::{GridSpec, Overview, ResampleAlg, WarpOptions};
+use wxy_warp::{GridSpec, Overview, ResampleAlg, WarpOptions, WarpPlan};
 
 #[derive(Parser)]
 #[command(name = "wxy", version, about = "wxylib from the shell")]
@@ -179,12 +179,29 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         .map(|d| *d.shape().last().unwrap_or(&0))
         .collect();
     let k = wxy_warp::choose_overview(&src.domains[0], &widths, &dst, &opts)?.map_or(0, |k| k + 1);
-    let out = wxy_warp::warp(&*src.levels[k], &src.domains[k], &dst, &opts, src.nodata).await?;
+    let (level, domain) = (&*src.levels[k], &src.domains[k]);
 
-    let mut grid = wxy_zarr::GridArray::new(out.window.size.clone(), dst.geotransform);
+    // One plan for every slice of the leading dims; the slices stream
+    // through in batches of whole source chunks, each written as it is
+    // warped.
+    let plan = WarpPlan::new(domain, level.dtype(), &dst, &opts, src.nodata)?;
+    let mut shape = plan.leading().to_vec();
+    shape.extend([s[1] as u64, s[0] as u64]);
+    let mut grid = wxy_zarr::GridArray::new(shape, dst.geotransform);
+    let lead = plan.leading().len();
+    grid.dims[..lead].clone_from_slice(
+        &domain.dims[..lead]
+            .iter()
+            .map(|d| d.name.clone())
+            .collect::<Vec<_>>(),
+    );
     grid.crs = Some(w.crs);
     grid.nodata = w.nodata.or(src.nodata);
-    wxy_zarr::write_path(&w.output, &w.array, &out.values, &grid).await?;
+    let out = wxy_zarr::create_path(&w.output, &w.array, level.dtype(), &grid).await?;
+    for batch in plan.batches(&level.grid().chunk, wxy_warp::BATCH_BYTES) {
+        let buf = plan.warp_slices(level, &batch).await?;
+        out.write_window(&buf.window, &buf.values).await?;
+    }
     Ok(())
 }
 

@@ -136,3 +136,81 @@ fn crs_the_writer_cannot_record_is_refused_before_reading() {
         );
     }
 }
+
+/// Stage S4b end to end: a time x depth x lat x lon Zarr store, chunked
+/// two time steps deep, streams through `wxy warp` batch by batch, and the
+/// store it writes keeps the leading dims and holds the in-memory warp.
+#[tokio::test]
+async fn a_4d_store_streams_through() {
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let (src, out) = (tmp.join("cli-4d-src.zarr"), tmp.join("cli-4d-out.zarr"));
+    for p in [&src, &out] {
+        let _ = std::fs::remove_dir_all(p);
+    }
+    let (nt, nz, ny, nx) = (3u64, 2u64, 90u64, 180u64);
+    let mut v = Vec::new();
+    for t in 0..nt {
+        for z in 0..nz {
+            for r in 0..ny {
+                for c in 0..nx {
+                    let (lon, lat) = (-179.0 + 2.0 * c as f64, 89.0 - 2.0 * r as f64);
+                    let x =
+                        100.0 * (lon.to_radians() * (1 + t) as f64).sin() * lat.to_radians().cos();
+                    v.push((x + 10.0 * z as f64) as f32);
+                }
+            }
+        }
+    }
+    let values = wxy_source::Values::F32(v);
+    let grid = wxy_zarr::GridArray {
+        dims: ["time", "depth", "lat", "lon"].map(String::from).to_vec(),
+        shape: vec![nt, nz, ny, nx],
+        chunk: vec![2, 1, 45, 90],
+        geotransform: [-180.0, 2.0, 0.0, 90.0, 0.0, -2.0],
+        crs: Some("EPSG:4326".into()),
+        nodata: None,
+    };
+    wxy_zarr::write_path(&src, "/sst", &values, &grid)
+        .await
+        .unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_wxy"))
+        .arg("warp")
+        .arg(&src)
+        .arg(&out)
+        .args([
+            "--source-array",
+            "/sst",
+            "--crs",
+            "EPSG:3031",
+            "-r",
+            "bilinear",
+        ])
+        .args([
+            "--extent", "-5e6", "-5e6", "5e6", "5e6", "--size", "60", "60",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let got = wxy_zarr::open_path(&out, "/data").await.unwrap();
+    let d = &got.collection.domains[0];
+    let names: Vec<&str> = d.dims.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, ["time", "depth", "y", "x"]);
+    let shape = d.shape();
+    assert_eq!(shape, vec![nt, nz, 60, 60]);
+    let got = read_window(&got.source, &Window::new(vec![0; 4], shape))
+        .await
+        .unwrap();
+
+    let ds = wxy_zarr::open_path(&src, "/sst").await.unwrap();
+    let dst = wxy_warp::GridSpec::from_extent("EPSG:3031", [-5e6, 5e6, -5e6, 5e6], [60, 60]);
+    let opts = wxy_warp::WarpOptions {
+        resampling: wxy_warp::ResampleAlg::Bilinear,
+        ..Default::default()
+    };
+    let want = wxy_warp::warp(&ds.source, &ds.collection.domains[0], &dst, &opts, None)
+        .await
+        .unwrap();
+    assert_eq!(got.values, want.values);
+}

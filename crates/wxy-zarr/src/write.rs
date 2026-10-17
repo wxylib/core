@@ -29,15 +29,19 @@ pub struct GridArray {
 }
 
 impl GridArray {
-    /// A grid of `shape` with dims `band, y, x` (or `y, x` for 2D),
-    /// chunked by whole bands and 512 by 512 cells.
+    /// A grid of `shape` with dims `y, x`, `band, y, x`, or `dim_0, ...,
+    /// y, x` for more, chunked one slice of each leading dim and 512 by
+    /// 512 cells.
     pub fn new(shape: Vec<u64>, geotransform: [f64; 6]) -> Self {
-        let dims: Vec<String> = match shape.len() {
-            2 => vec!["y".into(), "x".into()],
-            _ => std::iter::once("band".to_string())
-                .chain(["y".into(), "x".into()])
-                .collect(),
-        };
+        let lead = shape.len().saturating_sub(2);
+        let dims: Vec<String> = match lead {
+            0 => vec![],
+            1 => vec!["band".to_string()],
+            _ => (0..lead).map(|i| format!("dim_{i}")).collect(),
+        }
+        .into_iter()
+        .chain(["y".into(), "x".into()])
+        .collect();
         let n = shape.len();
         let chunk = shape
             .iter()
@@ -113,11 +117,8 @@ pub async fn write_path(
     values: &Values,
     grid: &GridArray,
 ) -> Result<()> {
-    let root = root.as_ref();
-    std::fs::create_dir_all(root).map_err(|e| Error::Fetch(e.to_string()))?;
-    let fs = object_store::local::LocalFileSystem::new_with_prefix(root)
-        .map_err(|e| Error::Fetch(e.to_string()))?;
-    write_store(Arc::new(fs), array, values, grid).await
+    let w = create_path(root, array, values.dtype(), grid).await?;
+    w.write_all(values).await
 }
 
 /// Write to any object store, rooted at the Zarr hierarchy.
@@ -127,8 +128,8 @@ pub async fn write_store(
     values: &Values,
     grid: &GridArray,
 ) -> Result<()> {
-    let storage: Arc<WritableStorage> = Arc::new(zarrs_object_store::AsyncObjectStore::new(store));
-    write(storage, array, values, grid).await
+    let w = create_store(store, array, values.dtype(), grid).await?;
+    w.write_all(values).await
 }
 
 /// Write to any zarrs async storage. Every group above the array is
@@ -139,14 +140,52 @@ pub async fn write(
     values: &Values,
     grid: &GridArray,
 ) -> Result<()> {
-    let n: u64 = grid.shape.iter().product();
-    if values.len() as u64 != n {
-        return Err(Error::Unsupported(format!(
-            "{} values for shape {:?}",
-            values.len(),
-            grid.shape
-        )));
-    }
+    let w = create(storage, array, values.dtype(), grid).await?;
+    w.write_all(values).await
+}
+
+/// An array whose metadata is written and whose values are written
+/// window by window ([`GridWriter::write_window`]), so that a result
+/// larger than memory can be streamed into it.
+pub struct GridWriter {
+    array: Array<WritableStorage>,
+    shape: Vec<u64>,
+}
+
+/// Create array `array` of `dtype` in a local directory (creating the
+/// directory), with no values written yet.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn create_path(
+    root: impl AsRef<std::path::Path>,
+    array: &str,
+    dtype: DataType,
+    grid: &GridArray,
+) -> Result<GridWriter> {
+    let root = root.as_ref();
+    std::fs::create_dir_all(root).map_err(|e| Error::Fetch(e.to_string()))?;
+    let fs = object_store::local::LocalFileSystem::new_with_prefix(root)
+        .map_err(|e| Error::Fetch(e.to_string()))?;
+    create_store(Arc::new(fs), array, dtype, grid).await
+}
+
+/// Create an array in any object store, rooted at the Zarr hierarchy.
+pub async fn create_store(
+    store: Arc<dyn object_store::ObjectStore>,
+    array: &str,
+    dtype: DataType,
+    grid: &GridArray,
+) -> Result<GridWriter> {
+    let storage: Arc<WritableStorage> = Arc::new(zarrs_object_store::AsyncObjectStore::new(store));
+    create(storage, array, dtype, grid).await
+}
+
+/// Create an array in any zarrs async storage, with every group above it.
+pub async fn create(
+    storage: Arc<WritableStorage>,
+    array: &str,
+    dtype: DataType,
+    grid: &GridArray,
+) -> Result<GridWriter> {
     let path = crate::normalise_path(array);
     let fail = |e: &dyn std::fmt::Display| Error::Fetch(e.to_string());
 
@@ -170,30 +209,64 @@ pub async fn write(
     }
 
     let meta: ArrayMetadata =
-        serde_json::from_value(grid.metadata(values.dtype())?).map_err(|e| fail(&e))?;
+        serde_json::from_value(grid.metadata(dtype)?).map_err(|e| fail(&e))?;
     let out = Array::new_with_metadata(storage, &path, meta).map_err(|e| fail(&e))?;
     out.async_store_metadata().await.map_err(|e| fail(&e))?;
-    let all = ArraySubset::new_with_shape(grid.shape.clone());
-    macro_rules! store {
-        ($v:expr) => {
-            out.async_store_array_subset(&all, $v)
-                .await
-                .map_err(|e| fail(&e))?
-        };
+    Ok(GridWriter {
+        array: out,
+        shape: grid.shape.clone(),
+    })
+}
+
+impl GridWriter {
+    /// Write `values` (C order over `window`). Windows aligned to the
+    /// array's chunks write whole chunks; others read and rewrite the
+    /// chunks they share.
+    pub async fn write_window(&self, window: &wxy_source::Window, values: &Values) -> Result<()> {
+        let fail = |e: &dyn std::fmt::Display| Error::Fetch(e.to_string());
+        let n = self.shape.len();
+        let fits = window.offset.len() == n
+            && window.size.len() == n
+            && (0..n).all(|d| window.offset[d] + window.size[d] <= self.shape[d]);
+        if !fits || values.len() as u64 != window.len() {
+            return Err(Error::Unsupported(format!(
+                "{} values for window {:?} + {:?} of shape {:?}",
+                values.len(),
+                window.offset,
+                window.size,
+                self.shape
+            )));
+        }
+        let subset = ArraySubset::new_with_start_shape(window.offset.clone(), window.size.clone())
+            .map_err(|e| fail(&e))?;
+        macro_rules! store {
+            ($v:expr) => {
+                self.array
+                    .async_store_array_subset(&subset, $v)
+                    .await
+                    .map_err(|e| fail(&e))?
+            };
+        }
+        match values {
+            Values::U8(v) => store!(v),
+            Values::U16(v) => store!(v),
+            Values::U32(v) => store!(v),
+            Values::U64(v) => store!(v),
+            Values::I8(v) => store!(v),
+            Values::I16(v) => store!(v),
+            Values::I32(v) => store!(v),
+            Values::I64(v) => store!(v),
+            Values::F32(v) => store!(v),
+            Values::F64(v) => store!(v),
+        }
+        Ok(())
     }
-    match values {
-        Values::U8(v) => store!(v),
-        Values::U16(v) => store!(v),
-        Values::U32(v) => store!(v),
-        Values::U64(v) => store!(v),
-        Values::I8(v) => store!(v),
-        Values::I16(v) => store!(v),
-        Values::I32(v) => store!(v),
-        Values::I64(v) => store!(v),
-        Values::F32(v) => store!(v),
-        Values::F64(v) => store!(v),
+
+    /// Write every value of the array at once.
+    pub async fn write_all(&self, values: &Values) -> Result<()> {
+        let all = wxy_source::Window::new(vec![0; self.shape.len()], self.shape.clone());
+        self.write_window(&all, values).await
     }
-    Ok(())
 }
 
 /// The Zarr v3 `data_type` name of a wxylib data type.
