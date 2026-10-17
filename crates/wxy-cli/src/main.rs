@@ -45,6 +45,18 @@ struct Points {
     /// GDAL does, instead of wrapping their longitude.
     #[arg(long)]
     no_wrap: bool,
+    /// near reads the cell a point falls in (gdallocationinfo); the others
+    /// interpolate as GDAL's InterpolateAtPoint, empty where it has no value.
+    #[arg(long, short, value_enum, default_value_t = PointResampling::Near)]
+    resampling: PointResampling,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PointResampling {
+    Near,
+    Bilinear,
+    Cubic,
+    Cubicspline,
 }
 
 #[derive(Parser)]
@@ -205,8 +217,17 @@ async fn points(p: Points) -> Result<(), Failure> {
         use_bounds(&mut src.domains[0])?;
     }
     let (level, domain) = (&*src.levels[0], &src.domains[0]);
-    let plan = wxy_warp::plan_points(domain, &level.grid().chunk, &p.crs, &x, &y, !p.no_wrap)?;
-    let got = wxy_warp::extract_points(level, &plan).await?;
+    let options = wxy_warp::PointOptions {
+        method: match p.resampling {
+            PointResampling::Near => wxy_warp::PointMethod::Nearest,
+            PointResampling::Bilinear => wxy_warp::PointMethod::Bilinear,
+            PointResampling::Cubic => wxy_warp::PointMethod::Cubic,
+            PointResampling::Cubicspline => wxy_warp::PointMethod::CubicSpline,
+        },
+        wrap_globe: !p.no_wrap,
+    };
+    let plan = wxy_warp::plan_points(domain, &level.grid().chunk, &p.crs, &x, &y, &options)?;
+    let got = wxy_warp::extract_points(level, &plan, src.nodata).await?;
     let values = got.values.to_f64();
     let lead = got.leading.len();
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
@@ -226,8 +247,9 @@ async fn points(p: Points) -> Result<(), Failure> {
             }
             let mut row = vec![x[i].to_string(), y[i].to_string()];
             row.extend(idx.iter().map(u64::to_string));
-            row.push(if got.found[i] {
-                values[l * n + i].to_string()
+            let v = values[l * n + i];
+            row.push(if got.found[i] && !v.is_nan() {
+                v.to_string()
             } else {
                 String::new()
             });

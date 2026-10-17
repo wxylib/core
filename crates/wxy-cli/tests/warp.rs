@@ -649,48 +649,70 @@ fn points_reads_what_gdal_reads() {
         eprintln!("skipping: no point fixtures at {}", dir.display());
         return;
     }
-    let name = "utm-u16-lzw-pred2-3band-4326";
-    let f64s = |s: &str| -> Vec<f64> {
-        std::fs::read(dir.join(format!("{name}-{s}.bin")))
-            .unwrap()
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
-            .collect()
-    };
-    let (x, y, want) = (f64s("x"), f64s("y"), f64s("values"));
-    let found = std::fs::read(dir.join(format!("{name}-found.bin"))).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wxy"))
-        .arg("points")
-        .arg(root.join("cog/utm-u16-lzw-pred2-3band.tif"))
-        .args(["--crs", "EPSG:4326", "--no-wrap"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        writeln!(stdin, "lon,lat").unwrap();
-        for (a, b) in x.iter().zip(&y) {
-            writeln!(stdin, "{a},{b}").unwrap();
+    // nearest from lon/lat; bilinear in the file's own CRS, where the
+    // positions are GDAL's to the bit
+    for (name, crs, method, file) in [
+        (
+            "utm-u16-lzw-pred2-3band-4326",
+            "EPSG:4326",
+            "near",
+            "values",
+        ),
+        (
+            "utm-u16-lzw-pred2-3band-native",
+            "EPSG:32755",
+            "bilinear",
+            "bilinear",
+        ),
+    ] {
+        let f64s = |s: &str| -> Vec<f64> {
+            std::fs::read(dir.join(format!("{name}-{s}.bin")))
+                .unwrap()
+                .chunks_exact(8)
+                .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                .collect()
+        };
+        let (x, y, want) = (f64s("x"), f64s("y"), f64s(file));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_wxy"))
+            .arg("points")
+            .arg(root.join("cog/utm-u16-lzw-pred2-3band.tif"))
+            .args(["--crs", crs, "--no-wrap", "-r", method])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            writeln!(stdin, "x,y").unwrap();
+            for (a, b) in x.iter().zip(&y) {
+                writeln!(stdin, "{a},{b}").unwrap();
+            }
         }
-    }
-    let out = child.wait_with_output().unwrap();
-    assert!(out.status.success());
-    let text = String::from_utf8(out.stdout).unwrap();
-    let mut lines = text.lines();
-    assert_eq!(lines.next(), Some("x,y,band,value"));
-    let n = x.len();
-    let rows: Vec<&str> = lines.collect();
-    assert_eq!(rows.len(), n * 3);
-    for (r, row) in rows.iter().enumerate() {
-        let (i, band) = (r / 3, r % 3);
-        let f: Vec<&str> = row.split(',').collect();
-        assert_eq!(f[0].parse::<f64>().unwrap(), x[i]);
-        assert_eq!(f[2], band.to_string());
-        if found[i] == 1 {
-            assert_eq!(f[3].parse::<f64>().unwrap(), want[band * n + i], "{row}");
-        } else {
-            assert_eq!(f[3], "", "{row}");
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        let text = String::from_utf8(out.stdout).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("x,y,band,value"));
+        let n = x.len();
+        let rows: Vec<&str> = lines.collect();
+        assert_eq!(rows.len(), n * 3);
+        let found = std::fs::read(dir.join(format!("{name}-found.bin"))).unwrap();
+        for (r, row) in rows.iter().enumerate() {
+            let (i, band) = (r / 3, r % 3);
+            let f: Vec<&str> = row.split(',').collect();
+            assert_eq!(f[0].parse::<f64>().unwrap(), x[i]);
+            assert_eq!(f[2], band.to_string());
+            let w = want[band * n + i];
+            let missing = if method == "near" {
+                found[i] == 0
+            } else {
+                w.is_nan()
+            };
+            if missing {
+                assert_eq!(f[3], "", "{row}");
+            } else {
+                assert_eq!(f[3].parse::<f64>().unwrap(), w, "{name} {row}");
+            }
         }
     }
 }

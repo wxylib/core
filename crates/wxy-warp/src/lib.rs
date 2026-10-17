@@ -45,7 +45,9 @@ mod chunked;
 mod extract;
 mod geoloc;
 
-pub use extract::{extract_points, plan_points, PointPlan, PointValues};
+pub use extract::{
+    extract_points, plan_pixels, plan_points, PointMethod, PointOptions, PointPlan, PointValues,
+};
 
 /// A target grid: CRS, GDAL geotransform and size `[ncol, nrow]`.
 #[derive(Debug, Clone, PartialEq)]
