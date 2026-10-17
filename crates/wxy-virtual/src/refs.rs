@@ -279,14 +279,14 @@ fn metadata(row: &ArrayRow, codecs: Vec<Value>, attrs: Map<String, Value>) -> Re
     }))
 }
 
+// By CF `standard_name`, `units` (any spelling, so BRAN2023's `yt_ocean` in
+// `degrees_N` counts) or name, as wxy-zarr reads CF stores.
 fn is_lat(c: &ArrayRow) -> bool {
-    c.attrs.get("units").and_then(Value::as_str) == Some("degrees_north")
-        || matches!(c.name.as_str(), "lat" | "latitude")
+    wxy_zarr::cf_axis(&c.name, &c.attrs) == Some(wxy_zarr::Axis::Lat)
 }
 
 fn is_lon(c: &ArrayRow) -> bool {
-    c.attrs.get("units").and_then(Value::as_str) == Some("degrees_east")
-        || matches!(c.name.as_str(), "lon" | "longitude")
+    wxy_zarr::cf_axis(&c.name, &c.attrs) == Some(wxy_zarr::Axis::Lon)
 }
 
 fn referenced(
@@ -601,5 +601,31 @@ mod tests {
         assert_eq!(a.metadata["fill_value"], json!(-1));
         assert_eq!(a.metadata["codecs"][1]["name"], json!("numcodecs.zlib"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Latitude and longitude are recognised by any CF unit spelling or
+    /// `standard_name`, not only by name (BRAN2023's `yt_ocean` is in
+    /// `degrees_N`).
+    #[test]
+    fn cf_axes_by_units_or_standard_name() {
+        let axis = |name: &str, attrs: Value| {
+            ArrayRow::parse(&json!({
+                "array": name, "kind": "coord", "storage": "affine",
+                "dims": [name], "shape": [3], "chunks": [3], "dtype": "<f8",
+                "attrs": attrs, "affine": {"start": 0.0, "step": 1.0},
+            }))
+            .unwrap()
+        };
+        for u in ["degrees_north", "degree_north", "degrees_N", "degree_N"] {
+            assert!(is_lat(&axis("yt_ocean", json!({"units": u}))), "{u}");
+            assert!(!is_lon(&axis("yt_ocean", json!({"units": u}))), "{u}");
+        }
+        for u in ["degrees_east", "degree_east", "degrees_E", "degree_E"] {
+            assert!(is_lon(&axis("xt_ocean", json!({"units": u}))), "{u}");
+        }
+        assert!(is_lat(&axis("y", json!({"standard_name": "latitude"}))));
+        assert!(is_lon(&axis("x", json!({"standard_name": "longitude"}))));
+        assert!(!is_lat(&axis("y", json!({"units": "m"}))));
+        assert!(is_lat(&axis("lat", json!({}))));
     }
 }

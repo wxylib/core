@@ -44,3 +44,7 @@ required-features = ["refs"]
 [[example]]
 name = "oisst_refs"
 required-features = ["refs"]
+
+[[example]]
+name = "bran_refs"
+required-features = ["refs"]

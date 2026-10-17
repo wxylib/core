@@ -433,15 +433,16 @@ async fn coordinate(
     sibling(storage, parent, name, &[len]).await
 }
 
+/// A horizontal CF axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Axis {
+pub enum Axis {
     Lon,
     Lat,
 }
 
 /// Whether a coordinate is longitude or latitude, by CF `standard_name`,
 /// then `units`, then its name.
-fn cf_axis(name: &str, attrs: &Map<String, Value>) -> Option<Axis> {
+pub fn cf_axis(name: &str, attrs: &Map<String, Value>) -> Option<Axis> {
     let get = |k: &str| {
         attrs
             .get(k)
