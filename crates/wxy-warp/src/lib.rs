@@ -474,7 +474,7 @@ impl WarpPlan {
                     .size()
                     .ok_or_else(|| Error::Unsupported(format!("warping {dtype:?}")))?;
                 let t = transformer(&src, dst, opts)?;
-                let special = special_points(&src, &t);
+                let special = special_points(&src, dst, &t);
                 let chunks = chunked::Planner::new(
                     &t,
                     src.size(),
@@ -839,32 +839,44 @@ fn method(alg: ResampleAlg) -> Option<wxy_resample::Method> {
 
 /// Target pixel positions of lon 0 at latitudes -89.9999 and 89.9999 in
 /// the source's geographic CRS (GDAL's special points: when one lands in
-/// the target, source windows are found by grid sampling). For a projected
-/// source the geographic CRS is taken as WGS84.
-fn special_points(src: &SourceGrid, t: &Approx) -> Vec<(f64, f64)> {
+/// the target, source windows are found by grid sampling). As GDAL's
+/// `GDALTransformLonLatToDestGenImgProjTransformer` does: none without a
+/// reprojection (source and target CRS the same); for a lon/lat source the
+/// lon/lat values go through the target geotransform as they are, without
+/// reprojection; a projected source's geographic CRS is taken as WGS84.
+fn special_points(src: &SourceGrid, dst: &GridSpec, t: &Approx) -> Vec<(f64, f64)> {
+    if same_crs(&src.crs, &dst.crs) {
+        return Vec::new();
+    }
     let Ok(p) = proj(&src.crs) else {
         return Vec::new();
     };
+    let mut out = Vec::new();
+    if p.is_latlong() {
+        let g = dst.geotransform;
+        let det = g[1] * g[5] - g[2] * g[4];
+        if det != 0.0 {
+            for lat in [-89.9999f64, 89.9999] {
+                let (dx, dy) = (0.0 - g[0], lat - g[3]);
+                out.push(((g[5] * dx - g[2] * dy) / det, (g[1] * dy - g[4] * dx) / det));
+            }
+        }
+        return out;
+    }
     let g = src.geotransform;
     let det = g[1] * g[5] - g[2] * g[4];
     if det == 0.0 {
         return Vec::new();
     }
-    let mut out = Vec::new();
+    let Ok(ll) = proj4rs::proj::Proj::from_user_string("+proj=longlat +datum=WGS84") else {
+        return Vec::new();
+    };
     for lat in [-89.9999f64, 89.9999] {
-        let (gx, gy) = if p.is_latlong() {
-            (0.0, lat)
-        } else {
-            let Ok(ll) = proj4rs::proj::Proj::from_user_string("+proj=longlat +datum=WGS84") else {
-                continue;
-            };
-            let mut pt = (0.0f64, lat.to_radians(), 0.0f64);
-            if proj4rs::transform::transform(&ll, &p, &mut pt).is_err() {
-                continue;
-            }
-            (pt.0, pt.1)
-        };
-        let (dx, dy) = (gx - g[0], gy - g[3]);
+        let mut pt = (0.0f64, lat.to_radians(), 0.0f64);
+        if proj4rs::transform::transform(&ll, &p, &mut pt).is_err() {
+            continue;
+        }
+        let (dx, dy) = (pt.0 - g[0], pt.1 - g[3]);
         let mut x = [(g[5] * dx - g[2] * dy) / det];
         let mut y = [(g[1] * dy - g[4] * dx) / det];
         if rwarp::Transformer::transform(t, false, &mut x, &mut y)[0] {
