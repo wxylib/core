@@ -38,7 +38,7 @@ use rwarp::warp::warp_resample_t;
 pub use rwarp::warp::ResampleAlg;
 use std::sync::Arc;
 
-use wxy_domain::{CellConvention, Domain, Frame, Positions};
+use wxy_domain::{CellConvention, CoordArray, Domain, Frame, Mapping, Positions};
 use wxy_source::{read_window, Buffer, ChunkSource, Error, Result, Values, Window};
 
 mod chunked;
@@ -148,6 +148,9 @@ impl SourceGrid {
         let m = domain
             .primary_for(x)
             .ok_or_else(|| Error::Unsupported("no mapping for the x dim".into()))?;
+        if m.dims == [x] {
+            return Self::from_domain(&axes_to_grid(domain, x)?);
+        }
         if m.dims != [x - 1, x] {
             return Err(Error::Unsupported(
                 "spatial dims must be the last two, as (y, x)".into(),
@@ -956,6 +959,73 @@ fn method(alg: ResampleAlg) -> Option<wxy_resample::Method> {
 /// reprojection (source and target CRS the same); for a lon/lat source the
 /// lon/lat values go through the target geotransform as they are, without
 /// reprojection; a projected source's geographic CRS is taken as WGS84.
+/// A domain whose y and x dims carry 1D coordinates (CF, xarray) as one
+/// 2D mapping: an affine when both axes are evenly spaced (the
+/// normalisation default), otherwise 2D x and y arrays at cell centres, so
+/// the warp goes through the geolocation transformer as GDAL's does for
+/// irregular axes.
+fn axes_to_grid(domain: &Domain, x: usize) -> Result<Domain> {
+    let mut d = domain.clone();
+    wxy_domain::normalise::normalise_domain(&mut d);
+    if let Some((a, frame)) = wxy_domain::normalise::affine_from_axes(&d, x - 1, x) {
+        let k = d.add_mapping(Mapping::new(vec![x - 1, x], Positions::Affine(a), frame));
+        d.set_primary(k);
+        return Ok(d);
+    }
+    let (ys, fy) = centres(domain, x - 1)?;
+    let (xs, fx) = centres(domain, x)?;
+    if fy != fx {
+        return Err(Error::Unsupported(
+            "y and x coordinates in different frames".into(),
+        ));
+    }
+    let (ny, nx) = (ys.len(), xs.len());
+    let mut lon = Vec::with_capacity(ny * nx);
+    let mut lat = Vec::with_capacity(ny * nx);
+    for y in &ys {
+        lon.extend_from_slice(&xs);
+        lat.extend(std::iter::repeat_n(*y, nx));
+    }
+    let k = d.add_mapping(
+        Mapping::new(
+            vec![x - 1, x],
+            Positions::Curvilinear(vec![
+                CoordArray::new(vec![ny, nx], lon),
+                CoordArray::new(vec![ny, nx], lat),
+            ]),
+            fx,
+        )
+        .with_cell(CellConvention::Centre),
+    );
+    d.set_primary(k);
+    Ok(d)
+}
+
+/// Cell-centre coordinates of dim `d` from its 1D mapping.
+fn centres(domain: &Domain, d: usize) -> Result<(Vec<f64>, Frame)> {
+    let n = domain.shape()[d] as usize;
+    let m = domain
+        .primary_for(d)
+        .filter(|m| m.dims == [d])
+        .ok_or_else(|| Error::Unsupported(format!("no 1D mapping for dim {d}")))?;
+    let v = match &m.positions {
+        Positions::Regular1 { origin, step } => {
+            (0..n).map(|i| origin + (i as f64 + 0.5) * step).collect()
+        }
+        Positions::Rectilinear(v) if v.len() == 1 && m.cell == CellConvention::Centre => {
+            v[0].clone()
+        }
+        other => {
+            return Err(Error::Unsupported(format!(
+                "warp from 1D {:?} positions at {:?}",
+                other.rung(),
+                m.cell
+            )))
+        }
+    };
+    Ok((v, m.frame.clone()))
+}
+
 fn special_points(src: &SourceGrid, dst: &GridSpec) -> Vec<(f64, f64)> {
     if same_crs(&src.crs, &dst.crs) {
         return Vec::new();

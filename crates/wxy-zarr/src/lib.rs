@@ -15,7 +15,13 @@
 //! - otherwise CF-style 1D coordinate arrays: a sibling array named after a
 //!   dim, with that dim's length, becomes a [`Positions::Rectilinear`]
 //!   mapping. These are stored positions; [`wxy_domain::normalise`]
-//!   recovers a regular grid when there is one.
+//!   recovers a regular grid when there is one;
+//! - CF auxiliary 2D longitude and latitude arrays (named by the array's
+//!   `coordinates` attribute, or `lon`/`lat` and the like) over the last
+//!   two dims: a [`Positions::Curvilinear`] mapping at cell centres.
+//!
+//! Longitude and latitude coordinates without a `proj:` CRS are taken to
+//! be WGS84 (EPSG:4326), as GDAL's netCDF driver assumes.
 //!
 //! Stage S3 reads regular chunk grids of fixed-size numeric types.
 //! [`write`] writes one georeferenced grid the same way (stage S4).
@@ -26,7 +32,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use wxy_domain::{
-    Affine, CellConvention, Collection, DataType, Dim, Domain, Field, Frame, Mapping, Positions,
+    Affine, CellConvention, Collection, CoordArray, DataType, Dim, Domain, Field, Frame, Mapping,
+    Positions,
 };
 use wxy_source::{
     read_window, Chunk, ChunkGrid, ChunkKey, ChunkSource, Encoded, Error, Result, Values, Window,
@@ -106,11 +113,20 @@ pub async fn open(storage: Arc<Storage>, path: &str) -> Result<ZarrDataset> {
     } else {
         for (d, name) in names.iter().enumerate() {
             if let Some(c) = coordinate(&storage, &parent, name, shape[d]).await? {
-                let f = frame
-                    .clone()
-                    .unwrap_or_else(|| Frame::Other("cf:unspecified".into()));
-                domain.add_mapping(Mapping::new(vec![d], Positions::Rectilinear(vec![c]), f));
+                let kind = cf_axis(name, &c.attrs);
+                let f = frame.clone().unwrap_or_else(|| default_frame(kind));
+                domain.add_mapping(Mapping::new(
+                    vec![d],
+                    Positions::Rectilinear(vec![c.values]),
+                    f,
+                ));
             }
+        }
+        // 2D longitude and latitude arrays over the last two dims (CF
+        // auxiliary coordinates): a curvilinear mapping, made primary.
+        if let Some(m) = curvilinear(&storage, &parent, &attrs, &names, &shape, &frame).await? {
+            let k = domain.add_mapping(m);
+            domain.set_primary(k);
         }
     }
 
@@ -364,13 +380,20 @@ fn missing(name: &str) -> Error {
     ))
 }
 
-/// A CF-style coordinate: sibling array `name`, 1D, of length `len`.
-async fn coordinate(
+/// A coordinate array's values and attributes.
+struct Coord {
+    values: Vec<f64>,
+    attrs: Map<String, Value>,
+}
+
+/// Sibling array `name` of `shape`, read whole, or `None` when there is no
+/// such array.
+async fn sibling(
     storage: &Arc<Storage>,
     parent: &str,
     name: &str,
-    len: u64,
-) -> Result<Option<Vec<f64>>> {
+    shape: &[u64],
+) -> Result<Option<Coord>> {
     let path = if parent == "/" {
         format!("/{name}")
     } else {
@@ -379,12 +402,132 @@ async fn coordinate(
     let Ok(array) = Array::async_open(storage.clone(), &path).await else {
         return Ok(None);
     };
-    if array.shape() != [len] {
+    if array.shape() != shape {
         return Ok(None);
     }
+    let attrs = array.attributes().clone();
     let Ok(source) = ZarrSource::new(array) else {
         return Ok(None);
     };
-    let buf = read_window(&source, &Window::new(vec![0], vec![len])).await?;
-    Ok(Some(buf.values.to_f64()))
+    let buf = read_window(&source, &Window::new(vec![0; shape.len()], shape.to_vec())).await?;
+    Ok(Some(Coord {
+        values: buf.values.to_f64(),
+        attrs,
+    }))
+}
+
+/// A CF-style coordinate: sibling array `name`, 1D, of length `len`.
+async fn coordinate(
+    storage: &Arc<Storage>,
+    parent: &str,
+    name: &str,
+    len: u64,
+) -> Result<Option<Coord>> {
+    sibling(storage, parent, name, &[len]).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    Lon,
+    Lat,
+}
+
+/// Whether a coordinate is longitude or latitude, by CF `standard_name`,
+/// then `units`, then its name.
+fn cf_axis(name: &str, attrs: &Map<String, Value>) -> Option<Axis> {
+    let get = |k: &str| {
+        attrs
+            .get(k)
+            .and_then(Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    match get("standard_name").as_deref() {
+        Some("longitude") => return Some(Axis::Lon),
+        Some("latitude") => return Some(Axis::Lat),
+        _ => {}
+    }
+    if let Some(u) = get("units") {
+        let u = u.replace(' ', "_");
+        if ["degrees_east", "degree_east", "degree_e", "degrees_e"].contains(&u.as_str()) {
+            return Some(Axis::Lon);
+        }
+        if ["degrees_north", "degree_north", "degree_n", "degrees_n"].contains(&u.as_str()) {
+            return Some(Axis::Lat);
+        }
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "lon" | "longitude" | "nav_lon" | "glamt" => Some(Axis::Lon),
+        "lat" | "latitude" | "nav_lat" | "gphit" => Some(Axis::Lat),
+        _ => None,
+    }
+}
+
+/// The frame of a coordinate with no `proj:` CRS: WGS84 longitude and
+/// latitude for CF longitude or latitude (as GDAL's netCDF driver
+/// assumes), otherwise unspecified.
+fn default_frame(axis: Option<Axis>) -> Frame {
+    match axis {
+        Some(_) => Frame::crs("EPSG:4326"),
+        None => Frame::Other("cf:unspecified".into()),
+    }
+}
+
+/// A curvilinear mapping on the last two dims from 2D longitude and
+/// latitude arrays: those the array's CF `coordinates` attribute names,
+/// or else siblings with the usual names, shaped like those dims.
+async fn curvilinear(
+    storage: &Arc<Storage>,
+    parent: &str,
+    attrs: &Map<String, Value>,
+    names: &[String],
+    shape: &[u64],
+    frame: &Option<Frame>,
+) -> Result<Option<Mapping>> {
+    let n = shape.len();
+    if n < 2 {
+        return Ok(None);
+    }
+    let grid = [shape[n - 2], shape[n - 1]];
+    let mut candidates: Vec<String> = attrs
+        .get("coordinates")
+        .and_then(Value::as_str)
+        .map(|c| c.split_whitespace().map(String::from).collect())
+        .unwrap_or_default();
+    for fallback in ["lon", "longitude", "nav_lon", "lat", "latitude", "nav_lat"] {
+        if !candidates.iter().any(|c| c == fallback) {
+            candidates.push(fallback.to_string());
+        }
+    }
+    let (mut lon, mut lat) = (None, None);
+    for name in &candidates {
+        if names.contains(name) {
+            continue;
+        }
+        let Some(c) = sibling(storage, parent, name, &grid).await? else {
+            continue;
+        };
+        match cf_axis(name, &c.attrs) {
+            Some(Axis::Lon) if lon.is_none() => lon = Some(c),
+            Some(Axis::Lat) if lat.is_none() => lat = Some(c),
+            _ => {}
+        }
+    }
+    let (Some(lon), Some(lat)) = (lon, lat) else {
+        return Ok(None);
+    };
+    let dims = [grid[0] as usize, grid[1] as usize];
+    let f = frame
+        .clone()
+        .unwrap_or_else(|| default_frame(Some(Axis::Lon)));
+    Ok(Some(
+        Mapping::new(
+            vec![n - 2, n - 1],
+            Positions::Curvilinear(vec![
+                CoordArray::new(dims.to_vec(), lon.values),
+                CoordArray::new(dims.to_vec(), lat.values),
+            ]),
+            f,
+        )
+        .with_cell(CellConvention::Centre),
+    ))
 }
