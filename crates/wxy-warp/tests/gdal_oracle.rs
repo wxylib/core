@@ -1,12 +1,11 @@
 //! Warps of the COG fixtures compared with GDAL's warper (wxylib/fixtures,
 //! warp/, made by scripts/make_warp_fixtures.py).
 //!
-//! The gate (design doc 03, S4): nearest neighbour is identical to GDAL on
-//! every case, and every method is identical where the target is near 1:1
-//! with the source window (`utm-to-4326`). Interpolated warps whose target
-//! is coarser than the source window differ by design until kernel scaling
-//! lands (stage S5, rwarp's documented limitation); they are reported, not
-//! failed.
+//! The gate (design doc 03, S4 and S5): every case and method is identical
+//! to GDAL, including interpolated warps whose target is coarser than the
+//! source, where the chunked warp (the default) stretches the kernel as
+//! GDAL does. [`plain_kernel_samples_coarse_targets`] keeps the plain
+//! (rwarp, 1:1 kernel) route honest about where it differs.
 
 use std::path::PathBuf;
 
@@ -107,9 +106,8 @@ async fn warps_match_gdal() {
             let want = decode(&want, case["dtype"].as_str().unwrap());
             let got = out.values.to_f64();
             let (n, max) = compare(&got, &want);
-            let gated = m == "near" || name == "utm-to-4326";
             report.push((
-                gated,
+                true,
                 n,
                 format!("{name} {m}: {n} of {} cells differ (max {max})", want.len()),
             ));
@@ -205,4 +203,35 @@ async fn pole_cell_reads_the_edge_row() {
         bottom.contains(&got),
         "pole cell {got} is not from the bottom row"
     );
+}
+
+/// With `chunked: false`, bilinear on a target coarser than the source
+/// samples the source at 1:1 (rwarp's kernel), so it differs from GDAL's
+/// smoothed result; at about 1:1 (`utm-to-4326`) it matches.
+#[tokio::test]
+async fn plain_kernel_samples_coarse_targets() {
+    let root = fixtures();
+    let Ok(ds) = wxy_tiff::open_path(root.join("cog/world-int16-deflate.tif")).await else {
+        eprintln!("skipping: no fixtures at {}", root.display());
+        return;
+    };
+    let dst = GridSpec::from_extent("EPSG:3031", [-4.0e6, 4.0e6, -4.0e6, 4.0e6], [145, 145]);
+    let want = decode(
+        &std::fs::read(root.join("warp/world-to-3031-bilinear.bin")).unwrap(),
+        "int16",
+    );
+    let run = |chunked| {
+        let opts = WarpOptions {
+            resampling: ResampleAlg::Bilinear,
+            wrap_globe: false,
+            chunked,
+            ..Default::default()
+        };
+        let (src, domain, dst) = (&ds.levels[0], &ds.collection.domains[0], &dst);
+        async move { warp(src, domain, dst, &opts, None).await.unwrap() }
+    };
+    let (scaled, _) = compare(&run(true).await.values.to_f64(), &want);
+    let (plain, _) = compare(&run(false).await.values.to_f64(), &want);
+    assert_eq!(scaled, 0);
+    assert!(plain > 1000, "plain kernel differs in only {plain} cells");
 }

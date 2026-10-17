@@ -11,6 +11,13 @@
 //!    virtual Zarr);
 //! 3. **warp**: resample with rwarp's kernel, all bands in one pass.
 //!
+//! By default (stage S5, [`WarpOptions::chunked`]) nearest, bilinear and
+//! cubic warps run as GDAL's warp operation does instead: chunk by chunk,
+//! with the source windows, kernel scales and kernels of GDAL's warper
+//! (wxy-resample), so that a target coarser than the source is smoothed as
+//! GDAL smooths it and the output matches GDAL's cell for cell. The steps
+//! above remain as the plain route.
+//!
 //! Stage S4 warps domains whose spatial dims carry an affine mapping in a
 //! CRS frame. CRS work uses rwarp's pure-Rust `proj4rs` backend (EPSG
 //! codes and proj strings, no datum grids); PROJ itself waits on
@@ -23,6 +30,8 @@ use rwarp::warp::warp_resample_t;
 pub use rwarp::warp::ResampleAlg;
 use wxy_domain::{Domain, Frame, Positions};
 use wxy_source::{read_window, Buffer, ChunkSource, Error, Result, Values, Window};
+
+mod chunked;
 
 /// A target grid: CRS, GDAL geotransform and size `[ncol, nrow]`.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +67,12 @@ pub struct WarpOptions {
     /// a cell centred on a pole reads the edge row it sits on. GDAL's
     /// warper leaves such cells empty; `false` matches it.
     pub wrap_globe: bool,
+    /// Warp as GDAL's warper does (`true`, the default): chunk by chunk,
+    /// each chunk's kernel stretched to the source cells a target cell
+    /// covers. `false` warps in one pass with rwarp's kernel at 1:1, which
+    /// samples rather than smooths a coarser target (bilinear and cubic
+    /// then differ from GDAL there).
+    pub chunked: bool,
 }
 
 impl Default for WarpOptions {
@@ -67,6 +82,7 @@ impl Default for WarpOptions {
             error_threshold: 0.125,
             nodata: None,
             wrap_globe: true,
+            chunked: true,
         }
     }
 }
@@ -261,7 +277,9 @@ fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<A
             None
         },
         exact: make()?,
-        nearest: alg == ResampleAlg::NearestNeighbour,
+        // The chunked warp checks source offsets as GDAL does and needs
+        // the positions as they are.
+        nearest: alg == ResampleAlg::NearestNeighbour && !opts.chunked,
         globe,
     })
 }
@@ -364,6 +382,11 @@ pub async fn warp<S: ChunkSource + ?Sized>(
         vec![nrow as u64, ncol as u64]
     };
     let out_window = Window::new(vec![0; out_shape.len()], out_shape.clone());
+    if opts.chunked {
+        if let Some(method) = method(opts.resampling) {
+            return warp_chunked(source, &src, dst, opts, nodata, method, out_window).await;
+        }
+    }
 
     // The transformer is not Send (PROJ handles), so it is rebuilt after
     // the read rather than held across it.
@@ -423,6 +446,153 @@ pub async fn warp<S: ChunkSource + ?Sized>(
         Values::U64(_) | Values::I64(_) => {
             return Err(Error::Unsupported("warping 64-bit integers".into()))
         }
+    };
+    Ok(Buffer {
+        window: out_window,
+        values,
+    })
+}
+
+fn method(alg: ResampleAlg) -> Option<wxy_resample::Method> {
+    match alg {
+        ResampleAlg::NearestNeighbour => Some(wxy_resample::Method::Nearest),
+        ResampleAlg::Bilinear => Some(wxy_resample::Method::Bilinear),
+        ResampleAlg::Cubic => Some(wxy_resample::Method::Cubic),
+        _ => None,
+    }
+}
+
+/// Target pixel positions of lon 0 at latitudes -89.9999 and 89.9999 in
+/// the source's geographic CRS (GDAL's special points: when one lands in
+/// the target, source windows are found by grid sampling). For a projected
+/// source the geographic CRS is taken as WGS84.
+fn special_points(src: &SourceGrid, t: &Approx) -> Vec<(f64, f64)> {
+    let Ok(p) = proj(&src.crs) else {
+        return Vec::new();
+    };
+    let g = src.geotransform;
+    let det = g[1] * g[5] - g[2] * g[4];
+    if det == 0.0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for lat in [-89.9999f64, 89.9999] {
+        let (gx, gy) = if p.is_latlong() {
+            (0.0, lat)
+        } else {
+            let Ok(ll) = proj4rs::proj::Proj::from_user_string("+proj=longlat +datum=WGS84") else {
+                continue;
+            };
+            let mut pt = (0.0f64, lat.to_radians(), 0.0f64);
+            if proj4rs::transform::transform(&ll, &p, &mut pt).is_err() {
+                continue;
+            }
+            (pt.0, pt.1)
+        };
+        let (dx, dy) = (gx - g[0], gy - g[3]);
+        let mut x = [(g[5] * dx - g[2] * dy) / det];
+        let mut y = [(g[1] * dy - g[4] * dx) / det];
+        if rwarp::Transformer::transform(t, false, &mut x, &mut y)[0] {
+            out.push((x[0], y[0]));
+        }
+    }
+    out
+}
+
+/// The chunked warp (S5): GDAL's chunks, windows and kernels. Bands are
+/// warped one at a time, as single-band GDAL warps.
+async fn warp_chunked<S: ChunkSource + ?Sized>(
+    source: &S,
+    src: &SourceGrid,
+    dst: &GridSpec,
+    opts: &WarpOptions,
+    nodata: Option<f64>,
+    method: wxy_resample::Method,
+    out_window: Window,
+) -> Result<Buffer> {
+    let (ncol, nrow) = (dst.size[0], dst.size[1]);
+    let bands = src.bands() as usize;
+    let dtype = source.dtype();
+    let bits = 8 * dtype
+        .size()
+        .ok_or_else(|| Error::Unsupported(format!("warping {dtype:?}")))?;
+    // The transformer is not Send, so it is built again after the read.
+    let chunks = {
+        let t = transformer(src, dst, opts)?;
+        let special = special_points(src, &t);
+        let planner = chunked::Planner::new(
+            &t,
+            src.size(),
+            [ncol as i32, nrow as i32],
+            method,
+            special,
+            src.globe()?,
+            bits,
+            nodata.is_some(),
+        );
+        planner.chunks()
+    };
+    let live: Vec<&chunked::Chunk> = chunks.iter().filter(|c| !c.is_empty()).collect();
+    if live.is_empty() {
+        return Ok(Buffer {
+            window: out_window,
+            values: fill(dtype, bands * ncol * nrow, nodata)?,
+        });
+    }
+    let x0 = live.iter().map(|c| c.src_off[0]).min().unwrap();
+    let y0 = live.iter().map(|c| c.src_off[1]).min().unwrap();
+    let x1 = live
+        .iter()
+        .map(|c| c.src_off[0] + c.src_size[0])
+        .max()
+        .unwrap();
+    let y1 = live
+        .iter()
+        .map(|c| c.src_off[1] + c.src_size[1])
+        .max()
+        .unwrap();
+    let (xs, ys) = ((x1 - x0) as u64, (y1 - y0) as u64);
+    let read = if src.shape.len() == 3 {
+        Window::new(vec![0, y0 as u64, x0 as u64], vec![bands as u64, ys, xs])
+    } else {
+        Window::new(vec![y0 as u64, x0 as u64], vec![ys, xs])
+    };
+    let buf = read_window(source, &read).await?;
+
+    let t = transformer(src, dst, opts)?;
+    let (n_src, n_dst) = ((xs * ys) as usize, ncol * nrow);
+    let region = ([x0, y0], [x1 - x0, y1 - y0]);
+    macro_rules! run {
+        ($v:expr, $variant:ident, $t:ty) => {{
+            let init = nodata.map(|n| n as $t).unwrap_or_default();
+            let mut out = vec![init; bands * n_dst];
+            for b in 0..bands {
+                chunked::warp_band::<$t>(
+                    &t,
+                    &chunks,
+                    method,
+                    &$v[b * n_src..(b + 1) * n_src],
+                    region.0,
+                    region.1,
+                    &mut out[b * n_dst..(b + 1) * n_dst],
+                    ncol,
+                    nodata,
+                );
+            }
+            Values::$variant(out)
+        }};
+    }
+    let values = match &buf.values {
+        Values::U8(v) => run!(v, U8, u8),
+        Values::I8(v) => run!(v, I8, i8),
+        Values::U16(v) => run!(v, U16, u16),
+        Values::I16(v) => run!(v, I16, i16),
+        Values::U32(v) => run!(v, U32, u32),
+        Values::I32(v) => run!(v, I32, i32),
+        Values::U64(v) => run!(v, U64, u64),
+        Values::I64(v) => run!(v, I64, i64),
+        Values::F32(v) => run!(v, F32, f32),
+        Values::F64(v) => run!(v, F64, f64),
     };
     Ok(Buffer {
         window: out_window,

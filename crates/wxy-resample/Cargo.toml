@@ -1,0 +1,12 @@
+[package]
+name = "wxy-resample"
+description = "Resampling kernels for warping, matching GDAL's warp kernel cell for cell, including kernel scaling for coarser targets. No transforms, no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["raster", "resampling", "warp", "geospatial"]
+categories = ["science::geo"]
+
+[dependencies]

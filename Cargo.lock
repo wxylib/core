@@ -5070,6 +5070,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wxy-resample"
+version = "0.0.1"
+
+[[package]]
 name = "wxy-source"
 version = "0.0.1"
 dependencies = [
@@ -5126,6 +5130,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "wxy-domain",
+ "wxy-resample",
  "wxy-source",
  "wxy-tiff",
 ]

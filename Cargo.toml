@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wxy-domain", "crates/wxy-source", "crates/wxy-tiff", "crates/wxy-geozarr", "crates/wxy-zarr", "crates/wxy-virtual", "crates/wxy-warp", "crates/wxy-cli"]
+members = ["crates/wxy-domain", "crates/wxy-source", "crates/wxy-tiff", "crates/wxy-geozarr", "crates/wxy-zarr", "crates/wxy-virtual", "crates/wxy-resample", "crates/wxy-warp", "crates/wxy-cli"]
 
 [workspace.package]
 version = "0.0.1"
@@ -13,6 +13,7 @@ authors = ["Michael Sumner <mdsumner@gmail.com>"]
 vaster = "0.2.0"
 wxy-domain = { path = "crates/wxy-domain", version = "0.0.1" }
 wxy-source = { path = "crates/wxy-source", version = "0.0.1" }
+wxy-resample = { path = "crates/wxy-resample", version = "0.0.1" }
 wxy-geozarr = { path = "crates/wxy-geozarr", version = "0.0.1" }
 async-trait = "0.1.89"
 bytes = "1.12.0"

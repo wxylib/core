@@ -60,6 +60,11 @@ struct Warp {
     /// as GDAL's warper does, instead of wrapping longitude and reading pole rows.
     #[arg(long)]
     no_wrap: bool,
+    /// Warp in one pass with a 1:1 kernel instead of chunk by chunk as
+    /// GDAL's warper does. Faster on large targets, but bilinear and cubic
+    /// then sample rather than smooth a target coarser than the source.
+    #[arg(long)]
+    plain: bool,
     /// Replace the output array if it exists.
     #[arg(long)]
     overwrite: bool,
@@ -144,6 +149,7 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         error_threshold: w.error_threshold,
         nodata: w.nodata,
         wrap_globe: !w.no_wrap,
+        chunked: !w.plain,
     };
     let out = wxy_warp::warp(&*src.source, &src.domain, &dst, &opts, src.nodata).await?;
 
