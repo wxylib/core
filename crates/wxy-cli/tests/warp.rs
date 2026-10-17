@@ -556,3 +556,65 @@ async fn one_d_cf_coordinates_warp() {
     assert!(got.iter().any(|&x| x != 0.0));
     assert_eq!(got, read_all(&b).await);
 }
+
+/// A store as xarray writes it (fixtures cf/): an OISST-style month with
+/// packed int16, float32 1D lat and lon, latitude ascending and longitude
+/// 0 to 360. `wxy warp` writes every day as GDAL's warper writes it from a
+/// north-up GeoTIFF of that day.
+#[tokio::test]
+async fn an_xarray_store_warps_as_gdal_does() {
+    let dir = fixtures().join("cf");
+    let Ok(file) = std::fs::File::open(dir.join("manifest.json")) else {
+        eprintln!("skipping: no cf fixtures at {}", dir.display());
+        return;
+    };
+    let m: Value = serde_json::from_reader(file).unwrap();
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let gt: Vec<f64> = m["geotransform"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let (w, h) = (m["width"].as_u64().unwrap(), m["height"].as_u64().unwrap());
+    let extent = [
+        gt[0],
+        gt[3] + gt[5] * h as f64,
+        gt[0] + gt[1] * w as f64,
+        gt[3],
+    ]
+    .map(|v| v.to_string());
+    for (k, r) in m["results"].as_array().unwrap().iter().enumerate() {
+        let method = r["resampling"].as_str().unwrap();
+        let out = tmp.join(format!("cli-cf-{k}.zarr"));
+        let _ = std::fs::remove_dir_all(&out);
+        let status = Command::new(env!("CARGO_BIN_EXE_wxy"))
+            .arg("warp")
+            .arg(dir.join(m["store"].as_str().unwrap()))
+            .arg(&out)
+            .args(["--source-array", m["array"].as_str().unwrap()])
+            .args([
+                "--crs",
+                m["crs"].as_str().unwrap(),
+                "-r",
+                method,
+                "--extent",
+            ])
+            .args(&extent)
+            .args(["--size", &w.to_string(), &h.to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success(), "{method}");
+        let ds = wxy_zarr::open_path(&out, "/data").await.unwrap();
+        let shape = ds.collection.domains[0].shape();
+        assert_eq!(shape, vec![m["days"].as_u64().unwrap(), 1, h, w]);
+        let got = read_window(&ds.source, &Window::new(vec![0; 4], shape))
+            .await
+            .unwrap();
+        let want = decode(
+            &std::fs::read(dir.join(r["file"].as_str().unwrap())).unwrap(),
+            "int16",
+        );
+        assert_eq!(got.values.to_f64(), want, "{method}");
+    }
+}
