@@ -210,12 +210,84 @@ pub async fn create(
 
     let meta: ArrayMetadata =
         serde_json::from_value(grid.metadata(dtype)?).map_err(|e| fail(&e))?;
-    let out = Array::new_with_metadata(storage, &path, meta).map_err(|e| fail(&e))?;
+    let out = Array::new_with_metadata(storage.clone(), &path, meta).map_err(|e| fail(&e))?;
     out.async_store_metadata().await.map_err(|e| fail(&e))?;
+    xy_coordinates(&storage, &parent, &path, grid).await?;
     Ok(GridWriter {
         array: out,
         shape: grid.shape.clone(),
     })
+}
+
+/// CF 1D coordinates for the y and x dims (cell centres), beside the
+/// array, so that CF readers such as xarray see the grid as well as
+/// GeoZarr readers do. Skipped for a rotated grid, and where the name is
+/// the array's own.
+async fn xy_coordinates(
+    storage: &Arc<WritableStorage>,
+    parent: &str,
+    path: &str,
+    grid: &GridArray,
+) -> Result<()> {
+    let fail = |e: &dyn std::fmt::Display| Error::Fetch(e.to_string());
+    let gt = grid.geotransform;
+    let n = grid.shape.len();
+    if n < 2 || gt[2] != 0.0 || gt[4] != 0.0 {
+        return Ok(());
+    }
+    let geographic = grid.crs.as_deref().is_some_and(|c| {
+        [
+            "EPSG:4326",
+            "EPSG:4258",
+            "EPSG:4269",
+            "EPSG:4283",
+            "EPSG:7844",
+        ]
+        .iter()
+        .any(|g| c.eq_ignore_ascii_case(g))
+    });
+    for (d, origin, step, axis) in [(n - 2, gt[3], gt[5], "Y"), (n - 1, gt[0], gt[1], "X")] {
+        let name = &grid.dims[d];
+        let at = format!("{}/{name}", parent.trim_end_matches('/'));
+        if at == path {
+            continue;
+        }
+        let len = grid.shape[d];
+        let values: Vec<f64> = (0..len).map(|i| origin + (i as f64 + 0.5) * step).collect();
+        let mut attrs = json!({"axis": axis});
+        match (geographic, axis) {
+            (true, "Y") => {
+                attrs["standard_name"] = json!("latitude");
+                attrs["units"] = json!("degrees_north");
+            }
+            (true, _) => {
+                attrs["standard_name"] = json!("longitude");
+                attrs["units"] = json!("degrees_east");
+            }
+            (false, "Y") => attrs["standard_name"] = json!("projection_y_coordinate"),
+            (false, _) => attrs["standard_name"] = json!("projection_x_coordinate"),
+        }
+        let meta: ArrayMetadata = serde_json::from_value(json!({
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": [len],
+            "data_type": "float64",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [len.max(1)]}},
+            "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+            "fill_value": "NaN",
+            "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+            "dimension_names": [name],
+            "attributes": attrs,
+        }))
+        .map_err(|e| fail(&e))?;
+        let a = Array::new_with_metadata(storage.clone(), &at, meta).map_err(|e| fail(&e))?;
+        a.async_store_metadata().await.map_err(|e| fail(&e))?;
+        let all = ArraySubset::new_with_start_shape(vec![0], vec![len]).map_err(|e| fail(&e))?;
+        a.async_store_array_subset(&all, &values)
+            .await
+            .map_err(|e| fail(&e))?;
+    }
+    Ok(())
 }
 
 impl GridWriter {

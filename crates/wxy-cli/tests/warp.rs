@@ -616,6 +616,25 @@ async fn an_xarray_store_warps_as_gdal_does() {
             "int16",
         );
         assert_eq!(got.values.to_f64(), want, "{method}");
+
+        // the leading coordinates copied as they were; x and y as CF
+        // 1D coordinates at cell centres
+        let store = dir.join(m["store"].as_str().unwrap());
+        for name in ["time", "zlev"] {
+            assert_eq!(
+                std::fs::read(out.join(name).join("zarr.json")).unwrap(),
+                std::fs::read(store.join(name).join("zarr.json")).unwrap(),
+                "{name}"
+            );
+        }
+        let xs = wxy_zarr::open_path(&out, "/x").await.unwrap();
+        let xs = read_window(&xs.source, &Window::new(vec![0], vec![w]))
+            .await
+            .unwrap()
+            .values
+            .to_f64();
+        assert_eq!(xs[0], gt[0] + 0.5 * gt[1]);
+        assert_eq!(xs[w as usize - 1], gt[0] + (w as f64 - 0.5) * gt[1]);
     }
 }
 

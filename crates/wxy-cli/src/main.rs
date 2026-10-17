@@ -303,6 +303,57 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         let buf = plan.warp_slices(level, &batch).await?;
         out.write_window(&buf.window, &buf.values).await?;
     }
+    if w.source.is_dir() {
+        copy_leading_coordinates(&w.source, &w.source_array, &w.output, &w.array, domain)?;
+    }
+    Ok(())
+}
+
+/// Copy the 1D coordinate arrays of the leading dims (time, depth) from a
+/// Zarr source to the output, beside the warped array, byte for byte (its
+/// codecs and attributes, such as CF time units, kept). An array of that
+/// name already in the output is left alone.
+fn copy_leading_coordinates(
+    source: &Path,
+    source_array: &str,
+    output: &Path,
+    array: &str,
+    domain: &wxy_domain::Domain,
+) -> Result<(), Failure> {
+    let parent = |root: &Path, a: &str| {
+        let a = a.trim_matches('/');
+        match a.rsplit_once('/') {
+            Some((p, _)) => root.join(p),
+            None => root.to_path_buf(),
+        }
+    };
+    let (from, to) = (parent(source, source_array), parent(output, array));
+    let lead = domain.dims.len().saturating_sub(2);
+    for dim in &domain.dims[..lead] {
+        let (src, dst) = (from.join(&dim.name), to.join(&dim.name));
+        let Ok(meta) = std::fs::read(src.join("zarr.json")) else {
+            continue;
+        };
+        let meta: serde_json::Value = serde_json::from_slice(&meta)?;
+        if meta["shape"] != serde_json::json!([dim.size]) || dst.exists() {
+            continue;
+        }
+        copy_dir(&src, &dst)?;
+    }
+    Ok(())
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let t = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&e.path(), &t)?;
+        } else {
+            std::fs::copy(e.path(), t)?;
+        }
+    }
     Ok(())
 }
 
