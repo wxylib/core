@@ -4,8 +4,9 @@
 //! passes through), ported from GDAL 3.12's `llrasterize.cpp`, with the
 //! ring orientation `gdalrasterize.cpp` imposes (OGR's `isClockwise`).
 
-/// Cells as `(row, col)`, on a grid of `w` by `h`.
-pub(crate) type Cells = Vec<(u32, u32)>;
+/// Burned cells as row spans `(row, first col, last col)`, inclusive, on
+/// a grid of `w` by `h`; they may overlap.
+pub(crate) type Spans = Vec<(u32, u32, u32)>;
 
 /// OGR's `OGRLineString::isClockwise` on a closed ring.
 pub(crate) fn is_clockwise(r: &[[f64; 2]]) -> bool {
@@ -68,7 +69,7 @@ pub(crate) fn filled_polygon(
     parts: &[usize],
     x: &[f64],
     y: &[f64],
-    out: &mut Cells,
+    out: &mut Spans,
 ) {
     if parts.is_empty() {
         return;
@@ -92,8 +93,8 @@ pub(crate) fn filled_polygon(
             return;
         }
         let (a, b) = (x1.max(0), x2.min(w - 1));
-        for c in a..=b {
-            out.push((row as u32, c as u32));
+        if a <= b {
+            out.push((row as u32, a as u32, b as u32));
         }
     };
     for yy in miny..=maxy {
@@ -162,11 +163,11 @@ pub(crate) fn line_all_touched(
     parts: &[usize],
     px: &[f64],
     py: &[f64],
-    out: &mut Cells,
+    out: &mut Spans,
 ) {
     const EPS: f64 = 1e-4;
     let (wf, hf) = (w as f64, h as f64);
-    let mut point = |row: i32, col: i32| out.push((row as u32, col as u32));
+    let mut point = |row: i32, col: i32| out.push((row as u32, col as u32, col as u32));
     let mut n = 0;
     for &size in parts {
         for j in 1..size {

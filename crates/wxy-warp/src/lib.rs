@@ -45,10 +45,14 @@ mod chunked;
 mod extract;
 mod geoloc;
 mod rasterize;
+mod zonal;
 
 pub use extract::{
-    extract_points, plan_pixels, plan_points, polygon_cells, polygon_coverage, CellCover,
-    PointMethod, PointOptions, PointPlan, PointValues,
+    extract_points, plan_pixels, plan_points, PointMethod, PointOptions, PointPlan, PointValues,
+};
+pub use zonal::{
+    plan_zones, polygon_cells, polygon_coverage, zonal_stats, CellCover, Rings, ZoneCells,
+    ZonePlan, ZoneStats,
 };
 
 /// A target grid: CRS, GDAL geotransform and size `[ncol, nrow]`.

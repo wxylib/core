@@ -366,96 +366,46 @@ async fn zonal(z: Zonal) -> Result<(), Failure> {
     }
     let (level, domain) = (&*src.levels[0], &src.domains[0]);
 
-    // each feature's cells (the union of its polygons') and their
-    // weights, then every cell read once per chunk as cell-centre points
-    let mut cells: Vec<Vec<[u64; 2]>> = Vec::with_capacity(features.len());
-    let mut weights: Vec<Vec<f64>> = Vec::with_capacity(features.len());
-    for (_, polys) in &features {
-        let mut c: Vec<([u64; 2], f64)> = if z.coverage {
-            wxy_warp::polygon_coverage(domain, &z.crs, polys)?
-                .into_iter()
-                .flatten()
-                .collect()
-        } else {
-            wxy_warp::polygon_cells(domain, &z.crs, polys, z.all_touched)?
-                .into_iter()
-                .flatten()
-                .map(|c| (c, 1.0))
-                .collect()
-        };
-        c.sort_by_key(|a| a.0);
-        let mut merged: Vec<([u64; 2], f64)> = Vec::with_capacity(c.len());
-        for (cell, f) in c {
-            match merged.last_mut() {
-                Some(last) if last.0 == cell => {
-                    // parts of a multipolygon: their cover adds, to a whole cell
-                    last.1 = if z.coverage {
-                        (last.1 + f).min(1.0)
-                    } else {
-                        1.0
-                    };
-                }
-                _ => merged.push((cell, f)),
-            }
-        }
-        cells.push(merged.iter().map(|c| c.0).collect());
-        weights.push(merged.iter().map(|c| c.1).collect());
-    }
-    let (px, py): (Vec<f64>, Vec<f64>) = cells
-        .iter()
-        .flatten()
-        .map(|&[r, c]| (c as f64 + 0.5, r as f64 + 0.5))
-        .unzip();
-    let options = wxy_warp::PointOptions {
-        method: wxy_warp::PointMethod::Nearest,
-        wrap_globe: false,
+    // each feature's cells as row spans, grouped by chunk; every chunk
+    // fetched once and summarised for each feature over it
+    let polys: Vec<Vec<wxy_warp::Rings>> = features.iter().map(|f| f.1.clone()).collect();
+    let cells = if z.coverage {
+        wxy_warp::ZoneCells::Coverage
+    } else if z.all_touched {
+        wxy_warp::ZoneCells::AllTouched
+    } else {
+        wxy_warp::ZoneCells::Centre
     };
-    let plan = wxy_warp::plan_pixels(domain, &level.grid().chunk, &px, &py, &options)?;
-    let got = wxy_warp::extract_points(level, &plan, src.nodata).await?;
-    let values = got.values.to_f64();
+    let plan = wxy_warp::plan_zones(domain, &level.grid().chunk, &z.crs, &polys, cells)?;
+    let stats = wxy_warp::zonal_stats(level, &plan, src.nodata).await?;
 
-    let lead = got.leading.len();
-    let n = px.len();
-    let n_lead = got.leading.iter().product::<u64>() as usize;
+    let leading = plan.leading().to_vec();
+    let lead = leading.len();
+    let n_lead = leading.iter().product::<u64>() as usize;
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     let mut header = vec!["feature".to_string()];
     header.extend(domain.dims[..lead].iter().map(|d| d.name.clone()));
     header.extend(["cells", "count", "sum", "mean", "min", "max"].map(String::from));
     writeln!(out, "{}", header.join(","))?;
-    let mut start = 0;
-    for (((id, _), c), wt) in features.iter().zip(&cells).zip(&weights) {
+    for (k, (id, _)) in features.iter().enumerate() {
         for l in 0..n_lead {
-            let vals = values[l * n + start..l * n + start + c.len()]
-                .iter()
-                .zip(wt)
-                .filter(|(v, _)| !v.is_nan() && src.nodata != Some(**v));
-            // count and sum weighted by cover (1 for whole cells)
-            let (mut count, mut sum, mut min, mut max) =
-                (0.0, 0.0, f64::INFINITY, f64::NEG_INFINITY);
-            for (&v, &f) in vals {
-                count += f;
-                sum += v * f;
-                min = min.min(v);
-                max = max.max(v);
-            }
+            let st = &stats[k * n_lead + l];
             let mut idx = vec![0u64; lead];
             let mut rem = l as u64;
             for d in (0..lead).rev() {
-                idx[d] = rem % got.leading[d];
-                rem /= got.leading[d];
+                idx[d] = rem % leading[d];
+                rem /= leading[d];
             }
             let mut row = vec![id.clone()];
             row.extend(idx.iter().map(u64::to_string));
-            row.push(c.len().to_string());
-            row.push(count.to_string());
-            if count > 0.0 {
-                row.extend([sum, sum / count, min, max].map(|v| v.to_string()));
-            } else {
-                row.extend(["", "", "", ""].map(String::from));
+            row.push(st.cells.to_string());
+            row.push(st.count.to_string());
+            match st.mean() {
+                Some(mean) => row.extend([st.sum, mean, st.min, st.max].map(|v| v.to_string())),
+                None => row.extend(["", "", "", ""].map(String::from)),
             }
             writeln!(out, "{}", row.join(","))?;
         }
-        start += c.len();
     }
     Ok(())
 }

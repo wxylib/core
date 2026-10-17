@@ -23,7 +23,7 @@ use wxy_source::{Chunk, ChunkKey, ChunkSource, Error, Result, Values};
 use crate::{transformer, GridSpec, ResampleAlg, SourceGrid, WarpOptions, IDENTITY};
 
 /// Chunks fetched per request.
-const FETCH_BATCH: usize = 64;
+pub(crate) const FETCH_BATCH: usize = 64;
 
 /// How a value is read at a point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -372,7 +372,7 @@ fn stride(chunk: &Chunk, lead: usize) -> u64 {
 
 /// Each leading index a chunk holds: its offset into the chunk's values,
 /// and its flat index over all leading slices.
-fn leading_slices(chunk: &Chunk, lead: usize, leading: &[u64]) -> Vec<(u64, usize)> {
+pub(crate) fn leading_slices(chunk: &Chunk, lead: usize, leading: &[u64]) -> Vec<(u64, usize)> {
     let mut strides = vec![1u64; lead + 2];
     for d in (0..lead + 1).rev() {
         strides[d] = strides[d + 1] * chunk.stored[d + 1];
@@ -474,7 +474,7 @@ fn cubic_spline(v: f64) -> f64 {
 }
 
 /// One value as f64.
-fn get(v: &Values, s: usize) -> f64 {
+pub(crate) fn get(v: &Values, s: usize) -> f64 {
     match v {
         Values::U8(a) => a[s] as f64,
         Values::U16(a) => a[s] as f64,
@@ -501,138 +501,4 @@ fn put(out: &mut Values, t: usize, from: &Values, s: usize) -> Result<()> {
     }
     each!(U8, U16, U32, U64, I8, I16, I32, I64, F32, F64);
     Ok(())
-}
-
-/// The cells of a source each polygon covers, as GDAL's rasterizer burns
-/// them for that polygon alone: a cell whose centre is inside, or with
-/// `all_touched` any cell the polygon touches. A polygon is its rings,
-/// exterior first, each closed, in `crs`; vertices go to the source one
-/// by one (no densifying), as gdal_rasterize reprojects them. Cells are
-/// `(row, col)`, sorted.
-pub fn polygon_cells(
-    domain: &Domain,
-    crs: &str,
-    polygons: &[Vec<Vec<[f64; 2]>>],
-    all_touched: bool,
-) -> Result<Vec<Vec<[u64; 2]>>> {
-    let src = SourceGrid::from_domain(domain)?;
-    let points = GridSpec {
-        crs: crs.into(),
-        geotransform: IDENTITY,
-        size: [1, 1],
-    };
-    let opts = WarpOptions {
-        resampling: ResampleAlg::NearestNeighbour,
-        error_threshold: 0.0,
-        wrap_globe: false,
-        ..Default::default()
-    };
-    let t = transformer(&src, &points, &opts)?;
-    let (h, w) = (src.shape[src.y_dim] as i32, src.shape[src.x_dim] as i32);
-    let mut out = Vec::with_capacity(polygons.len());
-    for rings in polygons {
-        // rings wound clockwise (in their own CRS), as GDAL collects them
-        let (mut x, mut y, mut parts) = (Vec::new(), Vec::new(), Vec::new());
-        for r in rings.iter().filter(|r| !r.is_empty()) {
-            let cw = crate::rasterize::is_clockwise(r);
-            let mut push = |p: &[f64; 2]| {
-                x.push(p[0]);
-                y.push(p[1]);
-            };
-            if cw {
-                r.iter().for_each(&mut push);
-            } else {
-                r.iter().rev().for_each(&mut push);
-            }
-            parts.push(r.len());
-        }
-        let mut cells = Vec::new();
-        if !parts.is_empty() {
-            rwarp::Transformer::transform(&t, true, &mut x, &mut y);
-            if all_touched {
-                crate::rasterize::line_all_touched(w, h, &parts, &x, &y, &mut cells);
-            }
-            crate::rasterize::filled_polygon(w, h, &parts, &x, &y, &mut cells);
-        }
-        cells.sort_unstable();
-        cells.dedup();
-        out.push(
-            cells
-                .into_iter()
-                .map(|(r, c)| [r as u64, c as u64])
-                .collect(),
-        );
-    }
-    Ok(out)
-}
-
-/// A cell `(row, col)` and the fraction of it a polygon covers.
-pub type CellCover = ([u64; 2], f64);
-
-/// The cells of a source each polygon covers and how much of each it
-/// covers (area of polygon within the cell over the cell's area, in
-/// `(0, 1]`), from controlledburn's exact coverage (exactextract's
-/// algorithm). Polygons are as in [`polygon_cells`]; the fractions are
-/// taken in the source's index space, so they are exact areas for an
-/// affine source and index-space areas for a curvilinear one.
-pub fn polygon_coverage(
-    domain: &Domain,
-    crs: &str,
-    polygons: &[Vec<Vec<[f64; 2]>>],
-) -> Result<Vec<Vec<CellCover>>> {
-    use controlledburn::{burn, BurnOptions, Coord, Geometry, GridSpec as BurnGrid, Polygon};
-    let src = SourceGrid::from_domain(domain)?;
-    let points = GridSpec {
-        crs: crs.into(),
-        geotransform: IDENTITY,
-        size: [1, 1],
-    };
-    let opts = WarpOptions {
-        resampling: ResampleAlg::NearestNeighbour,
-        error_threshold: 0.0,
-        wrap_globe: false,
-        ..Default::default()
-    };
-    let t = transformer(&src, &points, &opts)?;
-    let (h, w) = (src.shape[src.y_dim], src.shape[src.x_dim]);
-    // index space with y up: (pixel, -line) on a grid of unit cells
-    let grid = BurnGrid::new(0.0, -(h as f64), w as f64, 0.0, w as u32, h as u32);
-    // Each ring is burned on its own and holes subtracted: controlledburn
-    // 0.2.1 drops a hole's boundary cells where the exterior covers them
-    // fully (a patch is with hypertidy). Holes of a valid polygon lie
-    // inside its exterior and apart, so the difference is exact.
-    let (mut geoms, mut owner) = (Vec::new(), Vec::new());
-    for (k, rings) in polygons.iter().enumerate() {
-        for (i, r) in rings.iter().enumerate() {
-            let (mut x, mut y): (Vec<f64>, Vec<f64>) = r.iter().map(|p| (p[0], p[1])).unzip();
-            rwarp::Transformer::transform(&t, true, &mut x, &mut y);
-            let ring = x.iter().zip(&y).map(|(&x, &y)| Coord::new(x, -y)).collect();
-            geoms.push(Geometry::Polygon(Polygon::new(vec![ring])));
-            owner.push((k, if i == 0 { 1.0 } else { -1.0 }));
-        }
-    }
-    let r = burn(&geoms, &grid, BurnOptions::coverage())
-        .map_err(|e| Error::Unsupported(format!("coverage: {e}")))?;
-    let mut acc: Vec<BTreeMap<[u64; 2], f64>> = vec![BTreeMap::new(); polygons.len()];
-    let mut add = |id: i32, cell: [u64; 2], f: f64| {
-        let (k, sign) = owner[id as usize];
-        *acc[k].entry(cell).or_insert(0.0) += sign * f;
-    };
-    for run in &r.runs {
-        for c in run.col_start..run.col_end {
-            add(run.id, [run.row as u64, c as u64], 1.0);
-        }
-    }
-    for e in &r.edges {
-        add(e.id, [e.row as u64, e.col as u64], e.fraction as f64);
-    }
-    Ok(acc
-        .into_iter()
-        .map(|m| {
-            m.into_iter()
-                .filter(|&(_, f)| f > 1e-6)
-                .map(|(c, f)| (c, f.min(1.0)))
-                .collect()
-        })
-        .collect())
 }
