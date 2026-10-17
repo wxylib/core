@@ -12,8 +12,9 @@ The wxylib Cargo workspace. Design, decisions and roadmap are in
 | [`wxy-geozarr`](crates/wxy-geozarr) | S3 | The GeoZarr `spatial:` and `proj:` conventions (v0.1) over JSON attributes; no other wxylib dependency, so any Zarr tool can use it. |
 | [`wxy-zarr`](crates/wxy-zarr) | S3 | Zarr through zarrs: georeferenced by the GeoZarr `spatial:`/`proj:` conventions or CF coordinates; writes GeoZarr grids. |
 | [`wxy-virtual`](crates/wxy-virtual) | S3b | Scanners to virtual Zarr: TIFF tile byte ranges as Icechunk virtual references, read back through zarrs. |
-| [`wxy-warp`](crates/wxy-warp) | S4 | Warp a source onto a target grid through [rwarp](https://github.com/hypertidy/rwarp): plan the source window, read it, resample. |
-| [`wxy-cli`](crates/wxy-cli) | S4 | The `wxy` command. `wxy warp` warps a GeoTIFF or Zarr array to a GeoZarr grid. |
+| [`wxy-resample`](crates/wxy-resample) | S5 | GDAL's warp kernels in its arithmetic order, scaled when the target is coarser than the source. No transforms, no I/O. |
+| [`wxy-warp`](crates/wxy-warp) | S4 to S5b | Plan, fetch, resample: GDAL's chunked warp with `wxy-resample` kernels, or one pass through [rwarp](https://github.com/hypertidy/rwarp); regular, rectilinear and curvilinear sources, extra dimensions streamed under one plan; values at points and cells under polygons, each chunk fetched once. |
+| [`wxy-cli`](crates/wxy-cli) | S4, S4c | The `wxy` command: `warp` (to a GeoZarr grid), `points` and `zonal` (CSV out). |
 
 ```sh
 git clone https://github.com/wxylib/fixtures ../fixtures   # GDAL oracle data
@@ -21,13 +22,28 @@ cargo test
 ```
 
 ```sh
+# warp to Antarctic polar stereographic, written as GeoZarr
 cargo run -p wxy-cli -- warp ../fixtures/cog/world-int16-deflate.tif out.zarr \
-  --crs EPSG:3031 --extent -4e6 -4e6 4e6 4e6 --size 145 145
+  --crs EPSG:3031 --extent -4e6 -4e6 4e6 4e6 --size 145 145 -r bilinear
+
+# values at lon/lat points (x,y lines on stdin), as CSV
+printf '147.3,-42.9\n-70.6,-33.4\n' |
+  cargo run -p wxy-cli -- points ../fixtures/cog/world-int16-deflate.tif
+
+# statistics over GeoJSON polygons, weighted by exact cell coverage
+echo '{"type":"Polygon","coordinates":[[[140,-45],[150,-45],[150,-38],[140,-38],[140,-45]]]}' > box.geojson
+cargo run -p wxy-cli -- zonal ../fixtures/cog/world-int16-deflate.tif box.geojson --coverage
 ```
 
-The `wxy-tiff`, `wxy-zarr` and `wxy-virtual` tests compare every window byte for byte with what GDAL
-reads. The `wxy-warp` and `wxy-cli` tests compare warps with what GDAL's warper writes: identical
-for nearest neighbour, and for every method near 1:1 (interpolated downsampling waits on stage S5). They look for wxylib/fixtures at `../fixtures`, or at `WXY_FIXTURES`,
-and skip when it is missing.
+The tests compare every read, warp, point read and polygon with what GDAL
+gives for the same input, and require identical numbers; the
+[intro page](https://github.com/wxylib/docs#what-the-tests-check) lists the
+cases. They look for wxylib/fixtures at `../fixtures`, or at
+`WXY_FIXTURES`, and skip when it is missing.
+
+A worked example on real data: the
+[OISST walk-through](https://github.com/wxylib/docs/blob/main/oisst-virtual.md)
+reads a month of NOAA sea surface temperature as virtual Zarr
+(`cargo run -p wxy-virtual --example oisst_refs`).
 
 License: MIT OR Apache-2.0.
