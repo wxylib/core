@@ -289,7 +289,8 @@ async fn read_all(path: &std::path::Path) -> Vec<f64> {
 /// Stage S5b end to end: the fixtures' curvilinear swath as a CF Zarr
 /// store (2D `lon` and `lat` beside the data, named by `coordinates`)
 /// warps through `wxy warp` to what GDAL's warper writes from the same
-/// arrays through its geolocation transformer.
+/// arrays through its geolocation transformer; with `--bounds`, placed by
+/// its CF cell bounds, to what GDAL writes from the corner arrays.
 #[tokio::test]
 async fn a_cf_curvilinear_store_warps_as_gdal_does() {
     let root = fixtures();
@@ -321,7 +322,7 @@ async fn a_cf_curvilinear_store_warps_as_gdal_does() {
         &[ny, nx],
         &read("lon"),
         "float64",
-        serde_json::json!({"units": "degrees_east"}),
+        serde_json::json!({"units": "degrees_east", "bounds": "lon_bnds"}),
     );
     raw_array(
         &src,
@@ -330,13 +331,40 @@ async fn a_cf_curvilinear_store_warps_as_gdal_does() {
         &[ny, nx],
         &read("lat"),
         "float64",
-        serde_json::json!({"units": "degrees_north"}),
+        serde_json::json!({"units": "degrees_north", "bounds": "lat_bnds"}),
     );
+    // CF cell bounds from the fixtures' corner arrays: vertices c(j,i),
+    // c(j,i+1), c(j+1,i+1), c(j+1,i)
+    for (name, file) in [("lon_bnds", "edges-lon"), ("lat_bnds", "edges-lat")] {
+        let c: Vec<f64> = read(file)
+            .chunks_exact(8)
+            .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        let mut v = Vec::with_capacity(ny * nx * 4);
+        for j in 0..ny {
+            for i in 0..nx {
+                for (dj, di) in [(0, 0), (0, 1), (1, 1), (1, 0)] {
+                    v.push(c[(j + dj) * (nx + 1) + i + di]);
+                }
+            }
+        }
+        raw_array(
+            &src,
+            name,
+            &["y", "x", "nv"],
+            &[ny, nx, 4],
+            &f64_bytes(&v),
+            "float64",
+            serde_json::json!({}),
+        );
+    }
 
     let runs = [
         ("swath-to-4326", "bilinear"),
         ("swath-to-3031", "cubic"),
         ("swath-to-4326-coarse", "near"),
+        ("swath-edges-to-4326", "bilinear"),
+        ("swath-edges-to-3031", "near"),
     ];
     for (k, (name, method)) in runs.iter().enumerate() {
         let case = manifest["cases"]
@@ -372,6 +400,9 @@ async fn a_cf_curvilinear_store_warps_as_gdal_does() {
         ];
         args.extend(extent.iter().map(String::as_str));
         args.extend(["--size", &ws, &hs, "--no-wrap"]);
+        if case["cell"] == "edge" {
+            args.push("--bounds");
+        }
         let out = tmp.join(format!("cli-curvilinear-{k}.zarr"));
         warp_cli(&src, &out, &args);
         let file = case["results"]

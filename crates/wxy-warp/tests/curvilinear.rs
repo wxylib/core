@@ -1,12 +1,12 @@
 //! Stage S5b: warps from a curvilinear source (2D longitude and latitude
-//! arrays at cell centres) match GDAL's warper with its geolocation-array
+//! arrays at cell centres, or at cell corners) match GDAL's warper with its geolocation-array
 //! transformer, cell for cell (wxylib/fixtures, curvilinear/).
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use wxy_domain::{CoordArray, DataType, Dim, Domain, Frame, Mapping, Positions};
+use wxy_domain::{CellConvention, CoordArray, DataType, Dim, Domain, Frame, Mapping, Positions};
 use wxy_source::{Chunk, ChunkGrid, ChunkKey, ChunkSource, Encoded, Result, Values};
 use wxy_warp::{warp, GridSpec, ResampleAlg, WarpOptions};
 
@@ -77,16 +77,23 @@ async fn curvilinear_warps_match_gdal() {
             .map(|v| v.as_u64().unwrap() as usize)
             .collect();
         let (ny, nx) = (shape[0], shape[1]);
+        let (cell, e) = match case["cell"].as_str() {
+            Some("edge") => (CellConvention::Edge, 1),
+            _ => (CellConvention::Centre, 0),
+        };
         let read = |s: &str| std::fs::read(dir.join(format!("{base}-{s}.bin"))).unwrap();
-        let lon = CoordArray::new(vec![ny, nx], f64s(&read("lon")));
-        let lat = CoordArray::new(vec![ny, nx], f64s(&read("lat")));
+        let lon = CoordArray::new(vec![ny + e, nx + e], f64s(&read("lon")));
+        let lat = CoordArray::new(vec![ny + e, nx + e], f64s(&read("lat")));
         let values = f32s(&read("values"));
         let mut domain = Domain::new(vec![Dim::new("y", ny as u64), Dim::new("x", nx as u64)]);
-        let k = domain.add_mapping(Mapping::new(
-            vec![0, 1],
-            Positions::Curvilinear(vec![lon, lat]),
-            Frame::crs(case["source_crs"].as_str().unwrap()),
-        ));
+        let k = domain.add_mapping(
+            Mapping::new(
+                vec![0, 1],
+                Positions::Curvilinear(vec![lon, lat]),
+                Frame::crs(case["source_crs"].as_str().unwrap()),
+            )
+            .with_cell(cell),
+        );
         domain.set_primary(k);
         let src = Memory(
             ChunkGrid::new(vec![ny as u64, nx as u64], vec![ny as u64, nx as u64]),

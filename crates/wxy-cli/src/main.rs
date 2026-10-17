@@ -70,6 +70,10 @@ struct Warp {
     /// finer than that), N (overview N, 0 being the first) or none.
     #[arg(long, default_value = "auto", value_parser = parse_overview)]
     overview: Overview,
+    /// Place a curvilinear Zarr source by its CF cell bounds (the cell
+    /// corners) instead of by its cell centres as GDAL does.
+    #[arg(long)]
+    bounds: bool,
     /// Replace the output array if it exists.
     #[arg(long)]
     overwrite: bool,
@@ -157,7 +161,19 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         )
         .into());
     }
-    let src = open(&w.source, &w.source_array).await?;
+    let mut src = open(&w.source, &w.source_array).await?;
+    if w.bounds {
+        let d = &mut src.domains[0];
+        let k = d
+            .mappings
+            .iter()
+            .position(|m| {
+                m.cell == wxy_domain::CellConvention::Edge
+                    && matches!(m.positions, wxy_domain::Positions::Curvilinear(_))
+            })
+            .ok_or("--bounds: the source has no CF cell bounds")?;
+        d.set_primary(k);
+    }
     let (e, s) = (&w.extent, &w.size);
     if e[0] >= e[2] || e[1] >= e[3] {
         return Err("--extent must be xmin ymin xmax ymax with min < max".into());

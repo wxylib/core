@@ -124,9 +124,16 @@ pub async fn open(storage: Arc<Storage>, path: &str) -> Result<ZarrDataset> {
         }
         // 2D longitude and latitude arrays over the last two dims (CF
         // auxiliary coordinates): a curvilinear mapping, made primary.
-        if let Some(m) = curvilinear(&storage, &parent, &attrs, &names, &shape, &frame).await? {
+        // CF cell bounds on those arrays add a mapping at the cell corners,
+        // not primary: GDAL places such grids by their centres.
+        if let Some((m, edges)) =
+            curvilinear(&storage, &parent, &attrs, &names, &shape, &frame).await?
+        {
             let k = domain.add_mapping(m);
             domain.set_primary(k);
+            if let Some(e) = edges {
+                domain.add_mapping(e);
+            }
         }
     }
 
@@ -482,7 +489,7 @@ async fn curvilinear(
     names: &[String],
     shape: &[u64],
     frame: &Option<Frame>,
-) -> Result<Option<Mapping>> {
+) -> Result<Option<(Mapping, Option<Mapping>)>> {
     let n = shape.len();
     if n < 2 {
         return Ok(None);
@@ -519,15 +526,65 @@ async fn curvilinear(
     let f = frame
         .clone()
         .unwrap_or_else(|| default_frame(Some(Axis::Lon)));
-    Ok(Some(
-        Mapping::new(
-            vec![n - 2, n - 1],
-            Positions::Curvilinear(vec![
-                CoordArray::new(dims.to_vec(), lon.values),
-                CoordArray::new(dims.to_vec(), lat.values),
-            ]),
-            f,
-        )
-        .with_cell(CellConvention::Centre),
-    ))
+    let mut edges = None;
+    let bounds = |c: &Coord| {
+        c.attrs
+            .get("bounds")
+            .and_then(Value::as_str)
+            .map(String::from)
+    };
+    if let (Some(bx), Some(by)) = (bounds(&lon), bounds(&lat)) {
+        let vshape = [grid[0], grid[1], 4];
+        if let (Some(bx), Some(by)) = (
+            sibling(storage, parent, &bx, &vshape).await?,
+            sibling(storage, parent, &by, &vshape).await?,
+        ) {
+            if let (Some(cx), Some(cy)) = (corners(&bx.values, dims), corners(&by.values, dims)) {
+                let shape = vec![dims[0] + 1, dims[1] + 1];
+                edges = Some(
+                    Mapping::new(
+                        vec![n - 2, n - 1],
+                        Positions::Curvilinear(vec![
+                            CoordArray::new(shape.clone(), cx),
+                            CoordArray::new(shape, cy),
+                        ]),
+                        f.clone(),
+                    )
+                    .with_cell(CellConvention::Edge),
+                );
+            }
+        }
+    }
+    let centres = Mapping::new(
+        vec![n - 2, n - 1],
+        Positions::Curvilinear(vec![
+            CoordArray::new(dims.to_vec(), lon.values),
+            CoordArray::new(dims.to_vec(), lat.values),
+        ]),
+        f,
+    )
+    .with_cell(CellConvention::Centre);
+    Ok(Some((centres, edges)))
+}
+
+/// The `(ny + 1, nx + 1)` corner array of CF 2D cell bounds `(ny, nx, 4)`,
+/// whose vertices run `c(j,i), c(j,i+1), c(j+1,i+1), c(j+1,i)` (CF 7.1),
+/// when neighbouring cells agree on every shared corner.
+fn corners(b: &[f64], [ny, nx]: [usize; 2]) -> Option<Vec<f64>> {
+    let w = nx + 1;
+    let mut c = vec![f64::NAN; (ny + 1) * w];
+    for j in 0..ny {
+        for i in 0..nx {
+            let v = &b[(j * nx + i) * 4..][..4];
+            for (k, (dj, di)) in [(0, 0), (0, 1), (1, 1), (1, 0)].into_iter().enumerate() {
+                let at = &mut c[(j + dj) * w + i + di];
+                if at.is_nan() {
+                    *at = v[k];
+                } else if (*at - v[k]).abs() > 1e-9 * at.abs().max(1.0) {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(c)
 }

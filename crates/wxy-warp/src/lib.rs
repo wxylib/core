@@ -165,7 +165,11 @@ impl SourceGrid {
         let (geotransform, geoloc) = match &m.positions {
             Positions::Affine(a) => (a.0, None),
             Positions::Curvilinear(arrays) => {
-                let (ny, nx) = (shape[x - 1] as usize, shape[x] as usize);
+                // centres: one value per cell (GDAL's PIXEL_CENTER);
+                // edges: the cell corners, one more row and column
+                // (TOP_LEFT_CORNER, which then reaches the far edges)
+                let edge = usize::from(m.cell == CellConvention::Edge);
+                let (ny, nx) = (shape[x - 1] as usize + edge, shape[x] as usize + edge);
                 let [lon, lat] = arrays.as_slice() else {
                     return Err(Error::Unsupported(
                         "a curvilinear warp needs two arrays, x then y".into(),
@@ -173,13 +177,9 @@ impl SourceGrid {
                 };
                 if lon.shape != [ny, nx] || lat.shape != [ny, nx] {
                     return Err(Error::Unsupported(format!(
-                        "curvilinear arrays must be shaped like the grid ({ny}, {nx})"
+                        "curvilinear arrays at cell {:?} must be shaped ({ny}, {nx})",
+                        m.cell
                     )));
-                }
-                if m.cell != CellConvention::Centre {
-                    return Err(Error::Unsupported(
-                        "curvilinear arrays at cell edges (S5b warps cell centres)".into(),
-                    ));
                 }
                 let g = geoloc::GeoLoc::new(
                     nx,
@@ -187,7 +187,7 @@ impl SourceGrid {
                     lon.values.clone(),
                     lat.values.clone(),
                     None,
-                    false,
+                    edge == 1,
                     proj(crs)?.is_latlong(),
                 )
                 .map_err(Error::Unsupported)?;
@@ -961,7 +961,8 @@ fn method(alg: ResampleAlg) -> Option<wxy_resample::Method> {
 /// reprojection; a projected source's geographic CRS is taken as WGS84.
 /// A domain whose y and x dims carry 1D coordinates (CF, xarray) as one
 /// 2D mapping: an affine when both axes are evenly spaced (the
-/// normalisation default), otherwise 2D x and y arrays at cell centres, so
+/// normalisation default), otherwise 2D x and y arrays (at cell centres,
+/// or edges when an axis is stored as edges), so
 /// the warp goes through the geolocation transformer as GDAL's does for
 /// irregular axes.
 fn axes_to_grid(domain: &Domain, x: usize) -> Result<Domain> {
@@ -972,8 +973,19 @@ fn axes_to_grid(domain: &Domain, x: usize) -> Result<Domain> {
         d.set_primary(k);
         return Ok(d);
     }
-    let (ys, fy) = centres(domain, x - 1)?;
-    let (xs, fx) = centres(domain, x)?;
+    // edges if either axis is stored as edges (a regular axis gives either)
+    let edge = [x - 1, x].iter().any(|&d| {
+        domain.primary_for(d).is_some_and(|m| {
+            m.cell == CellConvention::Edge && matches!(m.positions, Positions::Rectilinear(_))
+        })
+    });
+    let cell = if edge {
+        CellConvention::Edge
+    } else {
+        CellConvention::Centre
+    };
+    let (ys, fy) = axis(domain, x - 1, cell)?;
+    let (xs, fx) = axis(domain, x, cell)?;
     if fy != fx {
         return Err(Error::Unsupported(
             "y and x coordinates in different frames".into(),
@@ -995,31 +1007,34 @@ fn axes_to_grid(domain: &Domain, x: usize) -> Result<Domain> {
             ]),
             fx,
         )
-        .with_cell(CellConvention::Centre),
+        .with_cell(cell),
     );
     d.set_primary(k);
     Ok(d)
 }
 
-/// Cell-centre coordinates of dim `d` from its 1D mapping.
-fn centres(domain: &Domain, d: usize) -> Result<(Vec<f64>, Frame)> {
+/// Coordinates of dim `d` from its 1D mapping, at cell centres (`n`) or
+/// edges (`n + 1`).
+fn axis(domain: &Domain, d: usize, cell: CellConvention) -> Result<(Vec<f64>, Frame)> {
     let n = domain.shape()[d] as usize;
     let m = domain
         .primary_for(d)
         .filter(|m| m.dims == [d])
         .ok_or_else(|| Error::Unsupported(format!("no 1D mapping for dim {d}")))?;
-    let v = match &m.positions {
-        Positions::Regular1 { origin, step } => {
+    let v = match (&m.positions, cell) {
+        (Positions::Regular1 { origin, step }, CellConvention::Centre) => {
             (0..n).map(|i| origin + (i as f64 + 0.5) * step).collect()
         }
-        Positions::Rectilinear(v) if v.len() == 1 && m.cell == CellConvention::Centre => {
-            v[0].clone()
+        (Positions::Regular1 { origin, step }, CellConvention::Edge) => {
+            (0..=n).map(|i| origin + i as f64 * step).collect()
         }
-        other => {
+        (Positions::Rectilinear(v), c) if v.len() == 1 && m.cell == c => v[0].clone(),
+        (other, _) => {
             return Err(Error::Unsupported(format!(
-                "warp from 1D {:?} positions at {:?}",
+                "warp from 1D {:?} positions at {:?} with the other axis at {:?}",
                 other.rung(),
-                m.cell
+                m.cell,
+                cell
             )))
         }
     };
