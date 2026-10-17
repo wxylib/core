@@ -1008,7 +1008,7 @@ async fn a_cached_warp_reads_nothing_the_second_time() {
         for row in wxy_cache::read_fragment(&f).unwrap() {
             if let Some(r) = refs
                 .iter()
-                .find(|r| r.url == row.path && r.offset == row.offset && r.length == row.size)
+                .find(|r| r.url == row.source && r.offset == row.offset && r.length == row.size)
             {
                 keys.insert(r.key.clone());
             }

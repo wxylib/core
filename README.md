@@ -14,7 +14,7 @@ The wxylib Cargo workspace. Design, decisions and roadmap are in
 | [`wxy-virtual`](crates/wxy-virtual) | S3b | Scanners to virtual Zarr: TIFF tile byte ranges as Icechunk virtual references, read back through zarrs. |
 | [`wxy-resample`](crates/wxy-resample) | S5 | GDAL's warp kernels in its arithmetic order, scaled when the target is coarser than the source. No transforms, no I/O. |
 | [`wxy-warp`](crates/wxy-warp) | S4 to S5b | Plan, fetch, resample: GDAL's chunked warp with `wxy-resample` kernels, or one pass through [rwarp](https://github.com/hypertidy/rwarp); regular, rectilinear and curvilinear sources, extra dimensions streamed under one plan; values at points and cells under polygons, each chunk fetched once. |
-| [`wxy-cache`](crates/wxy-cache) | m05 C1 | A persistent byte-range cache: wraps a reader, keeps what it fetches (still encoded) as append-only Parquet rows `(path, offset, size, data, hash, etag)`, a reference table with the bytes. |
+| [`wxy-cache`](crates/wxy-cache) | m05 C1 | A persistent byte-range cache: wraps a reader, keeps what it fetches (still encoded) as append-only Parquet rows `(source, offset, size, url, data, hash, validator)`, partitioned by source: a reference table with the bytes. |
 | [`wxy-cli`](crates/wxy-cli) | S4, S4c | The `wxy` command: `warp` (to a GeoZarr grid), `points` and `zonal` (CSV out). |
 
 ```sh

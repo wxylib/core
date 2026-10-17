@@ -203,8 +203,8 @@ struct Opened {
     levels: Vec<Box<dyn ChunkSource>>,
     domains: Vec<wxy_domain::Domain>,
     nodata: Option<f64>,
-    /// The name and version the cache keeps this source's bytes under.
-    cache_key: Option<(String, Option<String>)>,
+    /// The source and version the cache keeps this source's bytes under.
+    cache_key: Option<(String, wxy_cache::Validator)>,
 }
 
 async fn open(path: &Path, array: &str) -> Result<Opened, Failure> {
@@ -229,9 +229,15 @@ async fn open_cached(
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
+        // a bare file is its own source, keyed by its URL
         let url = format!("file://{}", full.display());
-        let etag = Some(format!("{}-{mtime}", meta.len()));
-        let reader = cache.reader(wxy_tiff::path_reader(&full)?, url.clone(), etag.clone());
+        let validator = wxy_cache::Validator::SizeMtime(format!("{}-{mtime}", meta.len()));
+        let reader = cache.reader(
+            wxy_tiff::path_reader(&full)?,
+            url.clone(),
+            url.clone(),
+            validator.clone(),
+        );
         let ds = wxy_tiff::open(reader).await?;
         let c = ds.collection;
         return Ok(Opened {
@@ -242,7 +248,7 @@ async fn open_cached(
                 .collect(),
             nodata: c.fields[0].values.nodata,
             domains: c.domains,
-            cache_key: Some((url, etag)),
+            cache_key: Some((url, validator)),
         });
     }
     if path.is_dir() {
@@ -482,8 +488,8 @@ async fn zonal(z: Zonal) -> Result<(), Failure> {
 /// chunk is stored in.
 fn cache_summary(
     cache: &wxy_cache::Cache,
-    url: &str,
-    etag: Option<&str>,
+    source: &str,
+    validator: &wxy_cache::Validator,
     level: &dyn ChunkSource,
     e: &wxy_warp::Explain,
 ) -> wxy_warp::CacheSummary {
@@ -499,7 +505,11 @@ fn cache_summary(
             .stored_ranges(&wxy_source::ChunkKey(k.clone()))
             .unwrap_or_default();
         let bytes: u64 = ranges.iter().map(|r| r.end - r.start).sum();
-        if !ranges.is_empty() && ranges.iter().all(|r| cache.contains(url, r.clone(), etag)) {
+        if !ranges.is_empty()
+            && ranges
+                .iter()
+                .all(|r| cache.contains(source, r.clone(), validator))
+        {
             s.held += 1;
             s.held_bytes += bytes;
         } else {
@@ -571,8 +581,8 @@ async fn warp(w: Warp) -> Result<(), Failure> {
     let plan = WarpPlan::new(domain, level.dtype(), &dst, &opts, src.nodata)?;
     if w.dry_run {
         let mut e = plan.explain(level, wxy_warp::BATCH_BYTES);
-        if let (Some(cache), Some((url, etag))) = (&cache, &src.cache_key) {
-            e.fetch.cache = Some(cache_summary(cache, url, etag.as_deref(), level, &e));
+        if let (Some(cache), Some((source, validator))) = (&cache, &src.cache_key) {
+            e.fetch.cache = Some(cache_summary(cache, source, validator, level, &e));
         }
         return print_plan(e, &w.source, k);
     }
