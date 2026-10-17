@@ -33,6 +33,10 @@ printf '147.3,-42.9\n-70.6,-33.4\n' |
 # statistics over GeoJSON polygons, weighted by exact cell coverage
 echo '{"type":"Polygon","coordinates":[[[140,-45],[150,-45],[150,-38],[140,-38],[140,-45]]]}' > box.geojson
 cargo run -p wxy-cli -- zonal ../fixtures/cog/world-int16-deflate.tif box.geojson --coverage
+
+# any of them with --dry-run: the plan as JSON (every chunk it would
+# fetch, the bytes that costs, how the warp is chunked), reading no data
+cargo run -p wxy-cli -- zonal ../fixtures/cog/world-int16-deflate.tif box.geojson --dry-run
 ```
 
 The tests compare every read, warp, point read and polygon with what GDAL
