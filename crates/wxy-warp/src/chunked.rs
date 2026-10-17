@@ -80,6 +80,10 @@ pub(crate) struct Planner<'a> {
     /// when it runs pole to pole (for [`Planner::round_trip`]).
     globe_width: Option<f64>,
     pole_rows: Option<f64>,
+    /// Whether the forward probe round-trips its points (affine sources:
+    /// proj4rs's antipode). A curvilinear source's edges can wrap onto
+    /// each other, so its points go back elsewhere; GDAL checks none.
+    check_round_trip: bool,
 }
 
 impl<'a> Planner<'a> {
@@ -93,6 +97,7 @@ impl<'a> Planner<'a> {
         globe: Option<(f64, Option<f64>)>,
         dtype_bits: usize,
         nodata: bool,
+        check_round_trip: bool,
     ) -> Self {
         let mask = if nodata { 1.0 } else { 0.0 };
         Self {
@@ -106,6 +111,7 @@ impl<'a> Planner<'a> {
             dst_bits: dtype_bits as f64 + mask,
             globe_width: globe.map(|g| g.0),
             pole_rows: globe.and_then(|g| g.1),
+            check_round_trip,
         }
     }
 
@@ -249,7 +255,9 @@ impl<'a> Planner<'a> {
             }
             let (sx, sy) = (xs.clone(), ys.clone());
             let mut ok = self.t.transform(false, &mut xs, &mut ys);
-            self.round_trip(&sx, &sy, &xs, &ys, &mut ok);
+            if self.check_round_trip {
+                self.round_trip(&sx, &sy, &xs, &ys, &mut ok);
+            }
             (0..xs.len())
                 .map(|i| (sx[i], sy[i], xs[i], ys[i], ok[i]))
                 .collect()

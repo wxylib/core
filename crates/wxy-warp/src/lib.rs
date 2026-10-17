@@ -25,7 +25,9 @@
 //! warp would be.
 //!
 //! Stage S4 warps domains whose spatial dims carry an affine mapping in a
-//! CRS frame. CRS work uses rwarp's pure-Rust `proj4rs` backend (EPSG
+//! CRS frame; stage S5b adds curvilinear ones (2D x and y arrays at cell
+//! centres), through GDAL's geolocation-array transformer ported in
+//! `geoloc`. CRS work uses rwarp's pure-Rust `proj4rs` backend (EPSG
 //! codes and proj strings, no datum grids); PROJ itself waits on
 //! rust-proj-capability.
 
@@ -34,10 +36,13 @@ use rwarp::source_window::{build_source_grid, compute_source_window, SourceWindo
 use rwarp::transform::GenImgProjTransformer;
 use rwarp::warp::warp_resample_t;
 pub use rwarp::warp::ResampleAlg;
-use wxy_domain::{Domain, Frame, Positions};
+use std::sync::Arc;
+
+use wxy_domain::{CellConvention, Domain, Frame, Positions};
 use wxy_source::{read_window, Buffer, ChunkSource, Error, Result, Values, Window};
 
 mod chunked;
+mod geoloc;
 
 /// A target grid: CRS, GDAL geotransform and size `[ncol, nrow]`.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,11 +123,19 @@ impl Default for WarpOptions {
 #[derive(Debug, Clone)]
 pub struct SourceGrid {
     pub crs: String,
+    /// The affine mapping; for a curvilinear source, the identity (its
+    /// positions come from the geolocation arrays instead).
     pub geotransform: [f64; 6],
     pub y_dim: usize,
     pub x_dim: usize,
     pub shape: Vec<u64>,
+    /// GDAL's geolocation-array transformer, for a curvilinear source.
+    geoloc: Option<Arc<geoloc::GeoLoc>>,
 }
+
+/// GDAL's geotransform for "pixel and georeferenced coordinates are the
+/// same": what the geolocation transformer's pixels pass through.
+const IDENTITY: [f64; 6] = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 impl SourceGrid {
     /// The primary affine mapping of `domain`, of rank 2 or more.
@@ -135,12 +148,6 @@ impl SourceGrid {
         let m = domain
             .primary_for(x)
             .ok_or_else(|| Error::Unsupported("no mapping for the x dim".into()))?;
-        let Positions::Affine(a) = &m.positions else {
-            return Err(Error::Unsupported(format!(
-                "warp from {:?} positions (S4 warps affine grids)",
-                m.rung()
-            )));
-        };
         if m.dims != [x - 1, x] {
             return Err(Error::Unsupported(
                 "spatial dims must be the last two, as (y, x)".into(),
@@ -152,12 +159,51 @@ impl SourceGrid {
                 m.frame
             )));
         };
+        let (geotransform, geoloc) = match &m.positions {
+            Positions::Affine(a) => (a.0, None),
+            Positions::Curvilinear(arrays) => {
+                let (ny, nx) = (shape[x - 1] as usize, shape[x] as usize);
+                let [lon, lat] = arrays.as_slice() else {
+                    return Err(Error::Unsupported(
+                        "a curvilinear warp needs two arrays, x then y".into(),
+                    ));
+                };
+                if lon.shape != [ny, nx] || lat.shape != [ny, nx] {
+                    return Err(Error::Unsupported(format!(
+                        "curvilinear arrays must be shaped like the grid ({ny}, {nx})"
+                    )));
+                }
+                if m.cell != CellConvention::Centre {
+                    return Err(Error::Unsupported(
+                        "curvilinear arrays at cell edges (S5b warps cell centres)".into(),
+                    ));
+                }
+                let g = geoloc::GeoLoc::new(
+                    nx,
+                    ny,
+                    lon.values.clone(),
+                    lat.values.clone(),
+                    None,
+                    false,
+                    proj(crs)?.is_latlong(),
+                )
+                .map_err(Error::Unsupported)?;
+                (IDENTITY, Some(Arc::new(g)))
+            }
+            other => {
+                return Err(Error::Unsupported(format!(
+                    "warp from {:?} positions (affine and curvilinear grids so far)",
+                    other.rung()
+                )))
+            }
+        };
         Ok(Self {
             crs: crs.clone(),
-            geotransform: a.0,
+            geotransform,
             y_dim: x - 1,
             x_dim: x,
             shape,
+            geoloc,
         })
     }
 
@@ -168,6 +214,9 @@ impl SourceGrid {
     /// For an unrotated lon/lat source 360 degrees wide, its width in
     /// columns, and its height in rows when it runs from pole to pole.
     fn globe(&self) -> Result<Option<(f64, Option<f64>)>> {
+        if self.geoloc.is_some() {
+            return Ok(None);
+        }
         let g = self.geotransform;
         let [w, h] = self.size().map(|n| n as f64);
         // Within a hundredth of a cell: steps read from float32 coordinates
@@ -280,7 +329,27 @@ fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<A
     let under = globe.filter(|_| (west + 180.0).abs() > 0.01 * src.geotransform[1].abs());
     let same = same_crs(&src.crs, &dst.crs);
     let make = || -> Result<Globe> {
-        let inner = if same {
+        let inner = if let Some(g) = &src.geoloc {
+            let (to_src, to_dst) = if same {
+                (None, None)
+            } else {
+                let (a, b) =
+                    rwarp::crs::crs_pair(&src.crs, &dst.crs).map_err(Error::Unsupported)?;
+                (Some(a), Some(b))
+            };
+            GenImgProjTransformer::with_backend(
+                IDENTITY,
+                dst.geotransform,
+                Box::new(GeolocToSource {
+                    geoloc: g.clone(),
+                    reproject: to_src,
+                }),
+                Box::new(GeolocToTarget {
+                    geoloc: g.clone(),
+                    reproject: to_dst,
+                }),
+            )
+        } else if same {
             GenImgProjTransformer::with_backend(
                 src.geotransform,
                 dst.geotransform,
@@ -323,6 +392,48 @@ struct Identity;
 impl rwarp::CrsTransform for Identity {
     fn convert(&self, x: f64, y: f64) -> Option<(f64, f64)> {
         Some((x, y))
+    }
+}
+
+/// Target CRS positions to curvilinear source pixels, as GDAL's
+/// `GDALGenImgProjTransform` does for a geolocation source: reproject to
+/// the arrays' CRS (unless it is the target's), then invert the arrays.
+/// It sits where a CRS transform goes, under an identity source
+/// geotransform, so the approximate transformer wraps it unchanged.
+struct GeolocToSource {
+    geoloc: Arc<geoloc::GeoLoc>,
+    reproject: Option<Box<dyn rwarp::CrsTransform>>,
+}
+
+impl rwarp::CrsTransform for GeolocToSource {
+    fn convert(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let (x, y) = match &self.reproject {
+            Some(r) => r.convert(x, y)?,
+            None => (x, y),
+        };
+        let (mut xs, mut ys, mut ok) = ([x], [y], [true]);
+        self.geoloc.inverse(&mut xs, &mut ys, &mut ok);
+        ok[0].then_some((xs[0], ys[0]))
+    }
+}
+
+/// Curvilinear source pixels to target CRS positions.
+struct GeolocToTarget {
+    geoloc: Arc<geoloc::GeoLoc>,
+    reproject: Option<Box<dyn rwarp::CrsTransform>>,
+}
+
+impl rwarp::CrsTransform for GeolocToTarget {
+    fn convert(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let (mut xs, mut ys, mut ok) = ([x], [y], [true]);
+        self.geoloc.forward(&mut xs, &mut ys, &mut ok);
+        if !ok[0] {
+            return None;
+        }
+        match &self.reproject {
+            Some(r) => r.convert(xs[0], ys[0]),
+            None => Some((xs[0], ys[0])),
+        }
     }
 }
 
@@ -474,7 +585,7 @@ impl WarpPlan {
                     .size()
                     .ok_or_else(|| Error::Unsupported(format!("warping {dtype:?}")))?;
                 let t = transformer(&src, dst, opts)?;
-                let special = special_points(&src, dst, &t);
+                let special = special_points(&src, dst);
                 let chunks = chunked::Planner::new(
                     &t,
                     src.size(),
@@ -484,6 +595,7 @@ impl WarpPlan {
                     src.globe()?,
                     bits,
                     nodata.is_some(),
+                    src.geoloc.is_none(),
                 )
                 .chunks();
                 let live: Vec<&chunked::Chunk> = chunks.iter().filter(|c| !c.is_empty()).collect();
@@ -844,7 +956,7 @@ fn method(alg: ResampleAlg) -> Option<wxy_resample::Method> {
 /// reprojection (source and target CRS the same); for a lon/lat source the
 /// lon/lat values go through the target geotransform as they are, without
 /// reprojection; a projected source's geographic CRS is taken as WGS84.
-fn special_points(src: &SourceGrid, dst: &GridSpec, t: &Approx) -> Vec<(f64, f64)> {
+fn special_points(src: &SourceGrid, dst: &GridSpec) -> Vec<(f64, f64)> {
     if same_crs(&src.crs, &dst.crs) {
         return Vec::new();
     }
@@ -863,12 +975,13 @@ fn special_points(src: &SourceGrid, dst: &GridSpec, t: &Approx) -> Vec<(f64, f64
         }
         return out;
     }
-    let g = src.geotransform;
-    let det = g[1] * g[5] - g[2] * g[4];
-    if det == 0.0 {
-        return Vec::new();
-    }
     let Ok(ll) = proj4rs::proj::Proj::from_user_string("+proj=longlat +datum=WGS84") else {
+        return Vec::new();
+    };
+    // Source CRS to target pixels: rwarp's pipeline with the source's
+    // positions taken as its pixels.
+    let Ok(to_dst) = GenImgProjTransformer::new(&src.crs, IDENTITY, &dst.crs, dst.geotransform)
+    else {
         return Vec::new();
     };
     for lat in [-89.9999f64, 89.9999] {
@@ -876,10 +989,8 @@ fn special_points(src: &SourceGrid, dst: &GridSpec, t: &Approx) -> Vec<(f64, f64
         if proj4rs::transform::transform(&ll, &p, &mut pt).is_err() {
             continue;
         }
-        let (dx, dy) = (pt.0 - g[0], pt.1 - g[3]);
-        let mut x = [(g[5] * dx - g[2] * dy) / det];
-        let mut y = [(g[1] * dy - g[4] * dx) / det];
-        if rwarp::Transformer::transform(t, false, &mut x, &mut y)[0] {
+        let (mut x, mut y) = ([pt.0], [pt.1]);
+        if rwarp::Transformer::transform(&to_dst, false, &mut x, &mut y)[0] {
             out.push((x[0], y[0]));
         }
     }
