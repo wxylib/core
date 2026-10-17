@@ -638,6 +638,84 @@ async fn an_xarray_store_warps_as_gdal_does() {
     }
 }
 
+/// Index space (fixtures index/, design m07, I1): a ROMS-style store with
+/// ROMS's names and CF attributes, `temp(s_rho, eta_rho, xi_rho)` placed by
+/// 2D `lon_rho` and `lat_rho`, NaN as an xarray-encoded `_FillValue`.
+/// `wxy warp` keeps the leading `s_rho` dim and writes the surface layer as
+/// GDAL's geolocation warp writes it.
+#[tokio::test]
+async fn a_roms_store_warps_as_gdal_does() {
+    let dir = fixtures().join("index");
+    let Ok(file) = std::fs::File::open(dir.join("manifest.json")) else {
+        eprintln!("skipping: no index fixtures at {}", dir.display());
+        return;
+    };
+    let m: Value = serde_json::from_reader(file).unwrap();
+    let case = &m["cases"][0];
+    assert_eq!(case["case"], "I1");
+    let n = case["shape"]["s_rho"].as_u64().unwrap();
+    let wp = &case["warp"];
+    let gt: Vec<f64> = wp["geotransform"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let (w, h) = (
+        wp["width"].as_u64().unwrap(),
+        wp["height"].as_u64().unwrap(),
+    );
+    let extent = [
+        gt[0],
+        gt[3] + gt[5] * h as f64,
+        gt[0] + gt[1] * w as f64,
+        gt[3],
+    ]
+    .map(|v| v.to_string());
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    for (k, r) in wp["results"].as_array().unwrap().iter().enumerate() {
+        let method = r["resampling"].as_str().unwrap();
+        let out = tmp.join(format!("cli-roms-{k}.zarr"));
+        let _ = std::fs::remove_dir_all(&out);
+        let status = Command::new(env!("CARGO_BIN_EXE_wxy"))
+            .arg("warp")
+            .arg(dir.join(case["store"].as_str().unwrap()))
+            .arg(&out)
+            .args([
+                "--source-array",
+                "/temp",
+                "--crs",
+                "EPSG:4326",
+                "-r",
+                method,
+            ])
+            .arg("--extent")
+            .args(&extent)
+            .args(["--size", &w.to_string(), &h.to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success(), "{method}");
+        let got = read_all(&out).await;
+        assert_eq!(got.len() as u64, n * h * w);
+        let top = &got[((n - 1) * h * w) as usize..];
+        let want: Vec<f32> = std::fs::read(dir.join(r["file"].as_str().unwrap()))
+            .unwrap()
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let mut valid = 0;
+        for (i, (&g, &e)) in top.iter().zip(&want).enumerate() {
+            if e.is_nan() {
+                assert!(g.is_nan(), "{method} cell {i}: {g}, GDAL nodata");
+            } else {
+                assert_eq!(g as f32, e, "{method} cell {i}");
+                valid += 1;
+            }
+        }
+        assert_eq!(valid, r["valid"].as_u64().unwrap(), "{method}");
+    }
+}
+
 /// `wxy points`: x,y lines in, one CSV row per point and band out, the
 /// values GDAL reads at those points (fixtures points/).
 #[test]

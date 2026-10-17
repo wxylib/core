@@ -140,7 +140,7 @@ pub async fn open(storage: Arc<Storage>, path: &str) -> Result<ZarrDataset> {
     let mut collection = Collection::new(path.trim_start_matches('/'));
     collection.add_domain(domain);
     let mut field = Field::new(path.rsplit('/').next().unwrap_or("data"), source.dtype, 0);
-    field.values.nodata = attrs.get("_FillValue").and_then(write::json_float);
+    field.values.nodata = attrs.get("_FillValue").and_then(fill_value_attr);
     if let Some(s) = attrs.get("scale_factor").and_then(Value::as_f64) {
         field.values.scale = Some(s);
     }
@@ -588,4 +588,55 @@ fn corners(b: &[f64], [ny, nx]: [usize; 2]) -> Option<Vec<f64>> {
         }
     }
     Some(c)
+}
+
+/// A CF `_FillValue` attribute: a number, `"NaN"` and the infinities, or
+/// the base64 of the value's little-endian bytes (4 or 8), as xarray
+/// writes floating-point fill values into Zarr v3 attributes.
+fn fill_value_attr(v: &Value) -> Option<f64> {
+    write::json_float(v).or_else(|| {
+        let b = base64_decode(v.as_str()?)?;
+        match b.len() {
+            8 => Some(f64::from_le_bytes(b.try_into().ok()?)),
+            4 => Some(f32::from_le_bytes(b.try_into().ok()?) as f64),
+            _ => None,
+        }
+    })
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in s.trim_end_matches('=').bytes() {
+        let d = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | d as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod fill_value_tests {
+    use super::*;
+
+    #[test]
+    fn xarray_base64_fill_values() {
+        let nan = fill_value_attr(&Value::String("AAAAAAAA+H8=".into())).unwrap();
+        assert!(nan.is_nan());
+        let v = fill_value_attr(&Value::String("AAAAAAAA8D8=".into())).unwrap();
+        assert_eq!(v, 1.0);
+        assert_eq!(fill_value_attr(&Value::from(-32768)), Some(-32768.0));
+        assert_eq!(fill_value_attr(&Value::String("x".into())), None);
+    }
 }
