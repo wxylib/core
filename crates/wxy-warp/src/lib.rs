@@ -73,6 +73,24 @@ pub struct WarpOptions {
     /// samples rather than smooths a coarser target (bilinear and cubic
     /// then differ from GDAL there).
     pub chunked: bool,
+    /// Which resolution level [`warp_pyramid`] reads (gdalwarp's `-ovr`).
+    /// [`warp`] reads the one source it is given.
+    pub overview: Overview,
+}
+
+/// Overview choice for [`warp_pyramid`], as gdalwarp's `-ovr`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overview {
+    /// Full resolution only (`-ovr NONE`).
+    None,
+    /// The coarsest level still at least as fine as the target, to within
+    /// a tenth of a cell (`-ovr AUTO`, gdalwarp's default).
+    Auto,
+    /// `n` levels finer than `Auto` picks (`-ovr AUTO-n`).
+    AutoFiner(usize),
+    /// Overview `k` (0 is the first overview, not full resolution), or
+    /// the coarsest when there are fewer (`-ovr k`).
+    Level(usize),
 }
 
 impl Default for WarpOptions {
@@ -83,6 +101,7 @@ impl Default for WarpOptions {
             nodata: None,
             wrap_globe: true,
             chunked: true,
+            overview: Overview::Auto,
         }
     }
 }
@@ -261,10 +280,19 @@ fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<A
     let west =
         src.geotransform[0].min(src.geotransform[0] + src.geotransform[1] * src.size()[0] as f64);
     let under = globe.filter(|_| (west + 180.0).abs() > 0.01 * src.geotransform[1].abs());
+    let same = same_crs(&src.crs, &dst.crs);
     let make = || -> Result<Globe> {
-        let inner =
+        let inner = if same {
+            GenImgProjTransformer::with_backend(
+                src.geotransform,
+                dst.geotransform,
+                Box::new(Identity),
+                Box::new(Identity),
+            )
+        } else {
             GenImgProjTransformer::new(&src.crs, src.geotransform, &dst.crs, dst.geotransform)
-                .map_err(Error::Unsupported)?;
+        }
+        .map_err(Error::Unsupported)?;
         Ok(Globe {
             inner,
             globe: under,
@@ -282,6 +310,22 @@ fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<A
         nearest: alg == ResampleAlg::NearestNeighbour && !opts.chunked,
         globe,
     })
+}
+
+/// Source and target in the same CRS: GDAL then skips reprojection and
+/// maps pixel to pixel through the two geotransforms alone. Going through
+/// the CRS backend instead (degrees to radians and back) moves positions
+/// by rounding error, enough to tip a value rounding at one half.
+fn same_crs(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+struct Identity;
+
+impl rwarp::CrsTransform for Identity {
+    fn convert(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        Some((x, y))
+    }
 }
 
 /// Parse `def` as the CRS backend does: an `EPSG:NNNN` code or a PROJ
@@ -451,6 +495,107 @@ pub async fn warp<S: ChunkSource + ?Sized>(
         window: out_window,
         values,
     })
+}
+
+/// The overview [`warp_pyramid`] reads for `dst`: an index into the
+/// overviews (0 is the first overview), or `None` for full resolution.
+/// `widths` are the overviews' widths in cells, finest first.
+///
+/// gdalwarp's choice with an explicit target extent and size: the target
+/// grid's corners and a 10 by 10 lattice are transformed exactly to the
+/// full-resolution source; the smaller of the x and y source spans per
+/// target cell is the ratio to meet, and the coarsest level whose width
+/// ratio stays below it plus a tenth wins.
+pub fn choose_overview(
+    full: &Domain,
+    widths: &[u64],
+    dst: &GridSpec,
+    opts: &WarpOptions,
+) -> Result<Option<usize>> {
+    let n = widths.len();
+    let auto_finer = match opts.overview {
+        Overview::None => return Ok(None),
+        _ if n == 0 => return Ok(None),
+        Overview::Level(k) => return Ok(Some(k.min(n - 1))),
+        Overview::Auto => 0,
+        Overview::AutoFiner(f) => f,
+    };
+    let src = SourceGrid::from_domain(full)?;
+    let exact = WarpOptions {
+        error_threshold: 0.0,
+        ..*opts
+    };
+    let t = transformer(&src, dst, &exact)?;
+    let (w, h) = (dst.size[0] as f64, dst.size[1] as f64);
+    let (mut xs, mut ys) = (Vec::with_capacity(100), Vec::with_capacity(100));
+    for ix in 0..10 {
+        for iy in 0..10 {
+            xs.push(w * ix as f64 / 9.0);
+            ys.push(h * iy as f64 / 9.0);
+        }
+    }
+    let ok = rwarp::Transformer::transform(&t, true, &mut xs, &mut ys);
+    let (mut x0, mut x1, mut y0, mut y1) = (
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for i in (0..ok.len()).filter(|&i| ok[i]) {
+        x0 = x0.min(xs[i]);
+        x1 = x1.max(xs[i]);
+        y0 = y0.min(ys[i]);
+        y1 = y1.max(ys[i]);
+    }
+    let rx = if x1 > x0 { (x1 - x0) / w } else { 0.0 };
+    let ry = if y1 > y0 { (y1 - y0) / h } else { 0.0 };
+    let target = rx.min(ry);
+    if target <= 1.0 {
+        return Ok(None);
+    }
+    const EPSILON: f64 = 0.1;
+    let full_width = src.shape[src.x_dim] as f64;
+    let (mut best, mut best_ratio) = (-1i64, 0.0);
+    for k in -1..n as i64 {
+        let ratio = if k < 0 {
+            1.0
+        } else {
+            full_width / widths[k as usize] as f64
+        };
+        if ratio >= target + EPSILON || ratio <= best_ratio {
+            continue;
+        }
+        best = k;
+        best_ratio = ratio;
+        if (target - ratio).abs() < EPSILON {
+            break;
+        }
+    }
+    let k = best - auto_finer as i64;
+    Ok((k >= 0).then_some(k as usize))
+}
+
+/// [`warp`] from a resolution pyramid: `levels[0]` at full resolution,
+/// then overviews finest to coarsest, each with its domain. The level is
+/// chosen by [`WarpOptions::overview`] (see [`choose_overview`]).
+pub async fn warp_pyramid<S: ChunkSource>(
+    levels: &[S],
+    domains: &[Domain],
+    dst: &GridSpec,
+    opts: &WarpOptions,
+    nodata: Option<f64>,
+) -> Result<Buffer> {
+    if levels.is_empty() || levels.len() != domains.len() {
+        return Err(Error::Unsupported(
+            "warp_pyramid needs one domain per level, at least one".into(),
+        ));
+    }
+    let widths: Vec<u64> = domains[1..]
+        .iter()
+        .map(|d| *d.shape().last().unwrap_or(&0))
+        .collect();
+    let k = choose_overview(&domains[0], &widths, dst, opts)?.map_or(0, |k| k + 1);
+    warp(&levels[k], &domains[k], dst, opts, nodata).await
 }
 
 fn method(alg: ResampleAlg) -> Option<wxy_resample::Method> {

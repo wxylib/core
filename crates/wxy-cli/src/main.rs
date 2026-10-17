@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use wxy_source::ChunkSource;
-use wxy_warp::{GridSpec, ResampleAlg, WarpOptions};
+use wxy_warp::{GridSpec, Overview, ResampleAlg, WarpOptions};
 
 #[derive(Parser)]
 #[command(name = "wxy", version, about = "wxylib from the shell")]
@@ -65,6 +65,11 @@ struct Warp {
     /// then sample rather than smooth a target coarser than the source.
     #[arg(long)]
     plain: bool,
+    /// Overview to read from a GeoTIFF with overviews, as gdalwarp's -ovr:
+    /// auto (the coarsest still finer than the target), auto-N (N levels
+    /// finer than that), N (overview N, 0 being the first) or none.
+    #[arg(long, default_value = "auto", value_parser = parse_overview)]
+    overview: Overview,
     /// Replace the output array if it exists.
     #[arg(long)]
     overwrite: bool,
@@ -87,12 +92,26 @@ impl From<Resampling> for ResampleAlg {
     }
 }
 
+fn parse_overview(s: &str) -> Result<Overview, String> {
+    let l = s.to_ascii_lowercase();
+    let bad = || format!("{s:?}: use auto, auto-N, N or none");
+    match l.as_str() {
+        "auto" => Ok(Overview::Auto),
+        "none" => Ok(Overview::None),
+        _ => match l.strip_prefix("auto-") {
+            Some(n) => n.parse().map(Overview::AutoFiner).map_err(|_| bad()),
+            None => l.parse().map(Overview::Level).map_err(|_| bad()),
+        },
+    }
+}
+
 type Failure = Box<dyn std::error::Error>;
 
-/// An opened source: chunks, index-space domain and nodata.
+/// An opened source: its resolution levels (full resolution first, then
+/// overviews finest to coarsest), their index-space domains, and nodata.
 struct Opened {
-    source: Box<dyn ChunkSource>,
-    domain: wxy_domain::Domain,
+    levels: Vec<Box<dyn ChunkSource>>,
+    domains: Vec<wxy_domain::Domain>,
     nodata: Option<f64>,
 }
 
@@ -101,18 +120,21 @@ async fn open(path: &Path, array: &str) -> Result<Opened, Failure> {
         let ds = wxy_zarr::open_path(path, array).await?;
         let mut c = ds.collection;
         Ok(Opened {
-            source: Box::new(ds.source),
+            levels: vec![Box::new(ds.source)],
             nodata: c.fields[0].values.nodata,
-            domain: c.domains.swap_remove(0),
+            domains: vec![c.domains.swap_remove(0)],
         })
     } else {
         let ds = wxy_tiff::open_path(path).await?;
-        let mut c = ds.collection;
-        let mut levels = ds.levels;
+        let c = ds.collection;
         Ok(Opened {
-            source: Box::new(levels.swap_remove(0)),
+            levels: ds
+                .levels
+                .into_iter()
+                .map(|l| Box::new(l) as Box<dyn ChunkSource>)
+                .collect(),
             nodata: c.fields[0].values.nodata,
-            domain: c.domains.swap_remove(0),
+            domains: c.domains,
         })
     }
 }
@@ -150,8 +172,14 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         nodata: w.nodata,
         wrap_globe: !w.no_wrap,
         chunked: !w.plain,
+        overview: w.overview,
     };
-    let out = wxy_warp::warp(&*src.source, &src.domain, &dst, &opts, src.nodata).await?;
+    let widths: Vec<u64> = src.domains[1..]
+        .iter()
+        .map(|d| *d.shape().last().unwrap_or(&0))
+        .collect();
+    let k = wxy_warp::choose_overview(&src.domains[0], &widths, &dst, &opts)?.map_or(0, |k| k + 1);
+    let out = wxy_warp::warp(&*src.levels[k], &src.domains[k], &dst, &opts, src.nodata).await?;
 
     let mut grid = wxy_zarr::GridArray::new(out.window.size.clone(), dst.geotransform);
     grid.crs = Some(w.crs);

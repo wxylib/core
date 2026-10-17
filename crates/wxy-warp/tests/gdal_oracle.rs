@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use serde_json::Value;
-use wxy_warp::{warp, GridSpec, ResampleAlg, WarpOptions};
+use wxy_warp::{choose_overview, warp, warp_pyramid, GridSpec, Overview, ResampleAlg, WarpOptions};
 
 fn fixtures() -> PathBuf {
     std::env::var("WXY_FIXTURES")
@@ -86,22 +86,29 @@ async fn warps_match_gdal() {
             ],
         };
         let nodata = ds.collection.fields[0].values.nodata;
+        // "auto" cases warp from gdalwarp's default overview choice
+        let overview = match case["overview"].as_str() {
+            Some("auto") => Overview::Auto,
+            _ => Overview::None,
+        };
+        let widths: Vec<u64> = ds.collection.domains[1..]
+            .iter()
+            .map(|d| *d.shape().last().unwrap())
+            .collect();
         for r in case["results"].as_array().unwrap() {
             let m = r["resampling"].as_str().unwrap();
             let opts = WarpOptions {
                 resampling: alg(m),
                 wrap_globe: case["wrap_globe"].as_bool().unwrap_or(false),
+                overview,
                 ..Default::default()
             };
-            let out = warp(
-                &ds.levels[0],
-                &ds.collection.domains[0],
-                &dst,
-                &opts,
-                nodata,
-            )
-            .await
-            .unwrap();
+            let level = choose_overview(&ds.collection.domains[0], &widths, &dst, &opts).unwrap();
+            let want_level = case["overview_level"].as_u64().map(|k| k as usize);
+            assert_eq!(level, want_level, "{name}: overview chosen");
+            let out = warp_pyramid(&ds.levels, &ds.collection.domains, &dst, &opts, nodata)
+                .await
+                .unwrap();
             let want = std::fs::read(root.join("warp").join(r["file"].as_str().unwrap())).unwrap();
             let want = decode(&want, case["dtype"].as_str().unwrap());
             let got = out.values.to_f64();

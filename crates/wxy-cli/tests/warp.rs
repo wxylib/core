@@ -40,6 +40,11 @@ async fn warp_writes_what_gdal_writes() {
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let runs = [
         ("utm-to-4326", "cubic", "cog/utm-u16-lzw-pred2-3band.tif"),
+        (
+            "utm-to-4326-ovr",
+            "bilinear",
+            "cog/utm-u16-lzw-pred2-3band.tif",
+        ),
         ("world-to-3031", "near", "cog/world-int16-deflate.tif"),
         ("world-to-3031", "near", "zarr/world-int16-spatial.zarr"),
     ];
