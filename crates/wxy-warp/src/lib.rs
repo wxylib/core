@@ -42,7 +42,10 @@ use wxy_domain::{CellConvention, CoordArray, Domain, Frame, Mapping, Positions};
 use wxy_source::{read_window, Buffer, ChunkSource, Error, Result, Values, Window};
 
 mod chunked;
+mod extract;
 mod geoloc;
+
+pub use extract::{extract_points, plan_points, PointPlan, PointValues};
 
 /// A target grid: CRS, GDAL geotransform and size `[ncol, nrow]`.
 #[derive(Debug, Clone, PartialEq)]

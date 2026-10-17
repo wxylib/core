@@ -2,6 +2,7 @@
 //!
 //! ```sh
 //! wxy warp in.tif out.zarr --crs EPSG:3031 --extent -4e6 -4e6 4e6 4e6 --size 145 145
+//! wxy points in.tif --crs EPSG:4326 < lonlat.csv > values.csv
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -22,6 +23,28 @@ struct Cli {
 enum Command {
     /// Warp a GeoTIFF or Zarr array onto a target grid, written as GeoZarr.
     Warp(Warp),
+    /// Read a GeoTIFF or Zarr array at points (x,y lines on stdin), each
+    /// chunk fetched once; values go to stdout as CSV.
+    Points(Points),
+}
+
+#[derive(Parser)]
+struct Points {
+    /// Source: a GeoTIFF file, or a Zarr store directory.
+    source: PathBuf,
+    /// CRS of the points (EPSG:NNNN or a PROJ string).
+    #[arg(long, default_value = "EPSG:4326")]
+    crs: String,
+    /// Array to read in a Zarr source.
+    #[arg(long, default_value = "/data")]
+    source_array: String,
+    /// Place a curvilinear Zarr source by its CF cell bounds.
+    #[arg(long)]
+    bounds: bool,
+    /// Leave points beyond a 360 degree lon/lat source's edge off it, as
+    /// GDAL does, instead of wrapping their longitude.
+    #[arg(long)]
+    no_wrap: bool,
 }
 
 #[derive(Parser)]
@@ -143,6 +166,77 @@ async fn open(path: &Path, array: &str) -> Result<Opened, Failure> {
     }
 }
 
+/// Choose the CF cell bounds of a curvilinear source as its placement.
+fn use_bounds(d: &mut wxy_domain::Domain) -> Result<(), Failure> {
+    let k = d
+        .mappings
+        .iter()
+        .position(|m| {
+            m.cell == wxy_domain::CellConvention::Edge
+                && matches!(m.positions, wxy_domain::Positions::Curvilinear(_))
+        })
+        .ok_or("--bounds: the source has no CF cell bounds")?;
+    d.set_primary(k);
+    Ok(())
+}
+
+async fn points(p: Points) -> Result<(), Failure> {
+    use std::io::{BufRead, Write};
+    wxy_warp::check_crs(&p.crs)?;
+    let (mut x, mut y) = (Vec::new(), Vec::new());
+    for (i, line) in std::io::stdin().lock().lines().enumerate() {
+        let line = line?;
+        let mut f = line.split(',').map(str::trim);
+        match (
+            f.next().map(str::parse::<f64>),
+            f.next().map(str::parse::<f64>),
+        ) {
+            (Some(Ok(a)), Some(Ok(b))) => {
+                x.push(a);
+                y.push(b);
+            }
+            // a header line, or blank
+            _ if i == 0 || line.trim().is_empty() => {}
+            _ => return Err(format!("line {}: expected x,y: {line:?}", i + 1).into()),
+        }
+    }
+    let mut src = open(&p.source, &p.source_array).await?;
+    if p.bounds {
+        use_bounds(&mut src.domains[0])?;
+    }
+    let (level, domain) = (&*src.levels[0], &src.domains[0]);
+    let plan = wxy_warp::plan_points(domain, &level.grid().chunk, &p.crs, &x, &y, !p.no_wrap)?;
+    let got = wxy_warp::extract_points(level, &plan).await?;
+    let values = got.values.to_f64();
+    let lead = got.leading.len();
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    let mut header = vec!["x".to_string(), "y".to_string()];
+    header.extend(domain.dims[..lead].iter().map(|d| d.name.clone()));
+    header.push("value".into());
+    writeln!(out, "{}", header.join(","))?;
+    let n = x.len();
+    let n_lead: u64 = got.leading.iter().product();
+    for i in 0..n {
+        for l in 0..n_lead as usize {
+            let mut idx = vec![0u64; lead];
+            let mut rem = l as u64;
+            for d in (0..lead).rev() {
+                idx[d] = rem % got.leading[d];
+                rem /= got.leading[d];
+            }
+            let mut row = vec![x[i].to_string(), y[i].to_string()];
+            row.extend(idx.iter().map(u64::to_string));
+            row.push(if got.found[i] {
+                values[l * n + i].to_string()
+            } else {
+                String::new()
+            });
+            writeln!(out, "{}", row.join(","))?;
+        }
+    }
+    Ok(())
+}
+
 async fn warp(w: Warp) -> Result<(), Failure> {
     let existing = w
         .output
@@ -163,16 +257,7 @@ async fn warp(w: Warp) -> Result<(), Failure> {
     }
     let mut src = open(&w.source, &w.source_array).await?;
     if w.bounds {
-        let d = &mut src.domains[0];
-        let k = d
-            .mappings
-            .iter()
-            .position(|m| {
-                m.cell == wxy_domain::CellConvention::Edge
-                    && matches!(m.positions, wxy_domain::Positions::Curvilinear(_))
-            })
-            .ok_or("--bounds: the source has no CF cell bounds")?;
-        d.set_primary(k);
+        use_bounds(&mut src.domains[0])?;
     }
     let (e, s) = (&w.extent, &w.size);
     if e[0] >= e[2] || e[1] >= e[3] {
@@ -226,6 +311,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Warp(w) => warp(w).await,
+        Command::Points(p) => points(p).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

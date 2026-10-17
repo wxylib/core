@@ -618,3 +618,60 @@ async fn an_xarray_store_warps_as_gdal_does() {
         assert_eq!(got.values.to_f64(), want, "{method}");
     }
 }
+
+/// `wxy points`: x,y lines in, one CSV row per point and band out, the
+/// values GDAL reads at those points (fixtures points/).
+#[test]
+fn points_reads_what_gdal_reads() {
+    use std::io::Write;
+    let root = fixtures();
+    let dir = root.join("points");
+    if !dir.join("manifest.json").exists() {
+        eprintln!("skipping: no point fixtures at {}", dir.display());
+        return;
+    }
+    let name = "utm-u16-lzw-pred2-3band-4326";
+    let f64s = |s: &str| -> Vec<f64> {
+        std::fs::read(dir.join(format!("{name}-{s}.bin")))
+            .unwrap()
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    };
+    let (x, y, want) = (f64s("x"), f64s("y"), f64s("values"));
+    let found = std::fs::read(dir.join(format!("{name}-found.bin"))).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wxy"))
+        .arg("points")
+        .arg(root.join("cog/utm-u16-lzw-pred2-3band.tif"))
+        .args(["--crs", "EPSG:4326", "--no-wrap"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "lon,lat").unwrap();
+        for (a, b) in x.iter().zip(&y) {
+            writeln!(stdin, "{a},{b}").unwrap();
+        }
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("x,y,band,value"));
+    let n = x.len();
+    let rows: Vec<&str> = lines.collect();
+    assert_eq!(rows.len(), n * 3);
+    for (r, row) in rows.iter().enumerate() {
+        let (i, band) = (r / 3, r % 3);
+        let f: Vec<&str> = row.split(',').collect();
+        assert_eq!(f[0].parse::<f64>().unwrap(), x[i]);
+        assert_eq!(f[2], band.to_string());
+        if found[i] == 1 {
+            assert_eq!(f[3].parse::<f64>().unwrap(), want[band * n + i], "{row}");
+        } else {
+            assert_eq!(f[3], "", "{row}");
+        }
+    }
+}
