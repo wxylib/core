@@ -147,6 +147,11 @@ struct Warp {
     /// corners) instead of by its cell centres as GDAL does.
     #[arg(long)]
     bounds: bool,
+    /// Keep the source's bytes, as fetched, in this cache directory
+    /// (append-only Parquet fragments) and read from it what it already
+    /// holds. GeoTIFF sources only.
+    #[arg(long, value_name = "DIR")]
+    cache: Option<PathBuf>,
     /// Working memory one warp chunk may take, in MB, before it is split
     /// into smaller chunks (gdalwarp's -wm).
     #[arg(long, default_value_t = 64.0)]
@@ -198,9 +203,48 @@ struct Opened {
     levels: Vec<Box<dyn ChunkSource>>,
     domains: Vec<wxy_domain::Domain>,
     nodata: Option<f64>,
+    /// The name and version the cache keeps this source's bytes under.
+    cache_key: Option<(String, Option<String>)>,
 }
 
 async fn open(path: &Path, array: &str) -> Result<Opened, Failure> {
+    open_cached(path, array, None).await
+}
+
+/// Open a source, its bytes read through `cache` when given (GeoTIFF
+/// only: m05 pilot C1). Rows are kept under the file's URL and an etag of
+/// its size and modification time.
+async fn open_cached(
+    path: &Path,
+    array: &str,
+    cache: Option<&std::sync::Arc<wxy_cache::Cache>>,
+) -> Result<Opened, Failure> {
+    if let Some(cache) = cache {
+        if path.is_dir() {
+            return Err("--cache reads GeoTIFF sources only, for now".into());
+        }
+        let full = std::fs::canonicalize(path)?;
+        let meta = std::fs::metadata(&full)?;
+        let mtime = meta
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let url = format!("file://{}", full.display());
+        let etag = Some(format!("{}-{mtime}", meta.len()));
+        let reader = cache.reader(wxy_tiff::path_reader(&full)?, url.clone(), etag.clone());
+        let ds = wxy_tiff::open(reader).await?;
+        let c = ds.collection;
+        return Ok(Opened {
+            levels: ds
+                .levels
+                .into_iter()
+                .map(|l| Box::new(l) as Box<dyn ChunkSource>)
+                .collect(),
+            nodata: c.fields[0].values.nodata,
+            domains: c.domains,
+            cache_key: Some((url, etag)),
+        });
+    }
     if path.is_dir() {
         let ds = wxy_zarr::open_path(path, array).await?;
         let mut c = ds.collection;
@@ -208,6 +252,7 @@ async fn open(path: &Path, array: &str) -> Result<Opened, Failure> {
             levels: vec![Box::new(ds.source)],
             nodata: c.fields[0].values.nodata,
             domains: vec![c.domains.swap_remove(0)],
+            cache_key: None,
         })
     } else {
         let ds = wxy_tiff::open_path(path).await?;
@@ -220,6 +265,7 @@ async fn open(path: &Path, array: &str) -> Result<Opened, Failure> {
                 .collect(),
             nodata: c.fields[0].values.nodata,
             domains: c.domains,
+            cache_key: None,
         })
     }
 }
@@ -432,6 +478,38 @@ async fn zonal(z: Zonal) -> Result<(), Failure> {
     Ok(())
 }
 
+/// How many of a plan's fetches `cache` holds, by the byte ranges each
+/// chunk is stored in.
+fn cache_summary(
+    cache: &wxy_cache::Cache,
+    url: &str,
+    etag: Option<&str>,
+    level: &dyn ChunkSource,
+    e: &wxy_warp::Explain,
+) -> wxy_warp::CacheSummary {
+    let mut s = wxy_warp::CacheSummary {
+        dir: cache.dir().display().to_string(),
+        held: 0,
+        held_bytes: 0,
+        missing: 0,
+        missing_bytes: 0,
+    };
+    for k in &e.fetch.keys {
+        let ranges = level
+            .stored_ranges(&wxy_source::ChunkKey(k.clone()))
+            .unwrap_or_default();
+        let bytes: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+        if !ranges.is_empty() && ranges.iter().all(|r| cache.contains(url, r.clone(), etag)) {
+            s.held += 1;
+            s.held_bytes += bytes;
+        } else {
+            s.missing += 1;
+            s.missing_bytes += bytes;
+        }
+    }
+    s
+}
+
 /// A plan as JSON on stdout, with where its source came from.
 fn print_plan(mut e: wxy_warp::Explain, source: &Path, level: usize) -> Result<(), Failure> {
     e.source.path = Some(source.display().to_string());
@@ -458,7 +536,8 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         )
         .into());
     }
-    let mut src = open(&w.source, &w.source_array).await?;
+    let cache = w.cache.as_ref().map(wxy_cache::Cache::open).transpose()?;
+    let mut src = open_cached(&w.source, &w.source_array, cache.as_ref()).await?;
     if w.bounds {
         use_bounds(&mut src.domains[0])?;
     }
@@ -491,7 +570,10 @@ async fn warp(w: Warp) -> Result<(), Failure> {
     // warped.
     let plan = WarpPlan::new(domain, level.dtype(), &dst, &opts, src.nodata)?;
     if w.dry_run {
-        let e = plan.explain(level, wxy_warp::BATCH_BYTES);
+        let mut e = plan.explain(level, wxy_warp::BATCH_BYTES);
+        if let (Some(cache), Some((url, etag))) = (&cache, &src.cache_key) {
+            e.fetch.cache = Some(cache_summary(cache, url, etag.as_deref(), level, &e));
+        }
         return print_plan(e, &w.source, k);
     }
     let mut shape = plan.leading().to_vec();
@@ -510,6 +592,14 @@ async fn warp(w: Warp) -> Result<(), Failure> {
     for batch in plan.batches(&level.grid().chunk, wxy_warp::BATCH_BYTES) {
         let buf = plan.warp_slices(level, &batch).await?;
         out.write_window(&buf.window, &buf.values).await?;
+    }
+    if let Some(cache) = &cache {
+        cache.flush()?;
+        let s = cache.stats();
+        eprintln!(
+            "cache: {} reads held ({} bytes), {} from the source ({} bytes)",
+            s.hits, s.hit_bytes, s.misses, s.miss_bytes
+        );
     }
     if w.source.is_dir() {
         copy_leading_coordinates(&w.source, &w.source_array, &w.output, &w.array, domain)?;

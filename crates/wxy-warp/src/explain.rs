@@ -59,6 +59,20 @@ pub struct Fetch {
     pub stored_bytes: Option<u64>,
     /// Each fetch's chunk key, in fetch order.
     pub keys: Vec<Vec<u64>>,
+    /// Of those fetches, what a byte-range cache already holds, when the
+    /// caller checked one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheSummary>,
+}
+
+/// Fetches a cache can answer, and those that must go to the source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheSummary {
+    pub dir: String,
+    pub held: usize,
+    pub held_bytes: u64,
+    pub missing: usize,
+    pub missing_bytes: u64,
 }
 
 /// A window `offset`, `size` over some dims.
@@ -139,6 +153,7 @@ fn fetch<S: ChunkSource + ?Sized>(source: &S, keys: Vec<ChunkKey>) -> Fetch {
         decoded_bytes: per_chunk * keys.len() as u64,
         stored_bytes: stored,
         keys: keys.into_iter().map(|k| k.0).collect(),
+        cache: None,
     }
 }
 

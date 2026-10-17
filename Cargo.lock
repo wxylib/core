@@ -5047,15 +5047,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
+name = "wxy-cache"
+version = "0.0.1"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "async-tiff",
+ "async-trait",
+ "bytes",
+ "parquet",
+ "sha2 0.11.1",
+ "tokio",
+]
+
+[[package]]
 name = "wxy-cli"
 version = "0.0.1"
 dependencies = [
  "clap",
  "serde_json",
  "tokio",
+ "wxy-cache",
  "wxy-domain",
  "wxy-source",
  "wxy-tiff",
+ "wxy-virtual",
  "wxy-warp",
  "wxy-zarr",
 ]

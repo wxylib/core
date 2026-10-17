@@ -914,3 +914,111 @@ async fn zonal_summarises_the_cells_gdal_burns() {
     assert!(plan["fetch"]["stored_bytes"].as_u64().unwrap() > 0);
     assert_eq!(plan["source"]["shape"], serde_json::json!(shape));
 }
+
+/// m05 pilot C1: `--cache DIR` keeps the bytes a warp reads; a second run
+/// reads nothing from the file and writes the same output; a dry run says
+/// what the cache holds; and the cached rows, joined to the file's
+/// reference table on (path, offset, size), give back the plan's chunks.
+#[tokio::test]
+async fn a_cached_warp_reads_nothing_the_second_time() {
+    let src = fixtures().join("cog/world-int16-deflate.tif");
+    if !src.exists() {
+        eprintln!("skipping: no fixture at {}", src.display());
+        return;
+    }
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cached-warp");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let cache = tmp.join("cache");
+    let wxy = |out: &str, extra: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_wxy"))
+            .arg("warp")
+            .arg(&src)
+            .arg(tmp.join(out))
+            .args([
+                "--crs",
+                "EPSG:3031",
+                "--extent",
+                "-4e6",
+                "-4e6",
+                "4e6",
+                "4e6",
+            ])
+            .args(["--size", "145", "145", "-r", "bilinear", "--cache"])
+            .arg(&cache)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        o
+    };
+    let dry = |label: &str| -> Value {
+        let plan: Value = serde_json::from_slice(&wxy("dry.zarr", &["--dry-run"]).stdout).unwrap();
+        eprintln!("{label}: {}", plan["fetch"]["cache"]);
+        plan
+    };
+    let held = |p: &Value| p["fetch"]["cache"]["held"].as_u64().unwrap();
+    let missing = |p: &Value| p["fetch"]["cache"]["missing"].as_u64().unwrap();
+
+    let before = dry("before");
+    let n = before["fetch"]["chunks"].as_u64().unwrap();
+    assert!(n > 1);
+    assert_eq!((held(&before), missing(&before)), (0, n));
+
+    let first = String::from_utf8(wxy("a.zarr", &[]).stderr).unwrap();
+    assert!(!first.contains(" 0 from the source"), "{first}");
+    let after = dry("after");
+    assert_eq!((held(&after), missing(&after)), (n, 0));
+    assert_eq!(
+        after["fetch"]["cache"]["held_bytes"],
+        after["fetch"]["stored_bytes"]
+    );
+
+    let second = String::from_utf8(wxy("b.zarr", &[]).stderr).unwrap();
+    assert!(second.contains(", 0 from the source (0 bytes)"), "{second}");
+    fn files(dir: &std::path::Path, out: &mut Vec<(PathBuf, Vec<u8>)>, root: &std::path::Path) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        for p in entries {
+            if p.is_dir() {
+                files(&p, out, root);
+            } else {
+                out.push((
+                    p.strip_prefix(root).unwrap().into(),
+                    std::fs::read(&p).unwrap(),
+                ));
+            }
+        }
+    }
+    let all = |d: &str| {
+        let mut v = Vec::new();
+        files(&tmp.join(d), &mut v, &tmp.join(d));
+        v
+    };
+    let (a, b) = (all("a.zarr"), all("b.zarr"));
+    assert!(a.len() > 1);
+    assert_eq!(a, b, "the cached run wrote a different store");
+
+    // the join: cached rows to the reference table, on (path, offset, size)
+    let refs = wxy_virtual::scan_tiff(&src).await.unwrap().refs;
+    let mut keys = std::collections::BTreeSet::new();
+    for f in wxy_cache::fragments(&cache).unwrap() {
+        for row in wxy_cache::read_fragment(&f).unwrap() {
+            if let Some(r) = refs
+                .iter()
+                .find(|r| r.url == row.path && r.offset == row.offset && r.length == row.size)
+            {
+                keys.insert(r.key.clone());
+            }
+        }
+    }
+    let planned: std::collections::BTreeSet<Vec<u64>> = after["fetch"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| serde_json::from_value(k.clone()).unwrap())
+        .collect();
+    assert_eq!(keys, planned);
+}

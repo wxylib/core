@@ -63,11 +63,18 @@ impl IfdSource {
 /// Open a local file.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn open_path(path: impl AsRef<std::path::Path>) -> Result<TiffDataset> {
+    open(path_reader(path)?).await
+}
+
+/// The byte reader [`open_path`] uses, for wrapping (a cache) before
+/// [`open`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn path_reader(path: impl AsRef<std::path::Path>) -> Result<Arc<dyn AsyncFileReader>> {
     let path = std::fs::canonicalize(path.as_ref()).map_err(|e| Error::Fetch(e.to_string()))?;
     let store = Arc::new(object_store::local::LocalFileSystem::new());
     let location = object_store::path::Path::from_filesystem_path(&path)
         .map_err(|e| Error::Fetch(e.to_string()))?;
-    open(Arc::new(ObjectReader::new(store, location))).await
+    Ok(Arc::new(ObjectReader::new(store, location)))
 }
 
 /// Open from any object store location.
@@ -266,11 +273,11 @@ impl ChunkSource for IfdSource {
         &self.grid
     }
 
-    fn stored_bytes(&self, key: &ChunkKey) -> Option<u64> {
+    fn stored_ranges(&self, key: &ChunkKey) -> Option<Vec<std::ops::Range<u64>>> {
         let (x, y) = (*key.0.get(2)? as usize, *key.0.get(1)? as usize);
         Some(match self.ifd().tile_byte_range(x, y)? {
-            TileByteRange::Chunky(r) => r.end - r.start,
-            TileByteRange::Planar(rs) => rs.iter().map(|r| r.end - r.start).sum(),
+            TileByteRange::Chunky(r) => vec![r],
+            TileByteRange::Planar(rs) => rs,
         })
     }
 

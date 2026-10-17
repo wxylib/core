@@ -49,7 +49,7 @@ mod geoloc;
 mod rasterize;
 mod zonal;
 
-pub use explain::{Detail, Explain, Fetch, Region, SourceSummary, WarpChunk};
+pub use explain::{CacheSummary, Detail, Explain, Fetch, Region, SourceSummary, WarpChunk};
 pub use extract::{
     extract_points, plan_pixels, plan_points, PointMethod, PointOptions, PointPlan, PointValues,
 };

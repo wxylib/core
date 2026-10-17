@@ -18,6 +18,7 @@ wxy-source.workspace = true
 wxy-tiff = { path = "../wxy-tiff" }
 wxy-zarr = { path = "../wxy-zarr" }
 wxy-warp = { path = "../wxy-warp" }
+wxy-cache = { path = "../wxy-cache" }
 clap = { version = "4", features = ["derive"] }
 tokio.workspace = true
 # float_roundtrip: GeoJSON coordinates parsed to the nearest double
@@ -25,3 +26,4 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
 serde_json = "1"
+wxy-virtual = { path = "../wxy-virtual" }

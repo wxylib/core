@@ -290,10 +290,20 @@ pub trait ChunkSource: Send + Sync {
     async fn fetch(&self, keys: &[ChunkKey]) -> Result<Vec<Encoded>>;
     /// CPU bound: decode one chunk.
     fn decode(&self, encoded: Encoded) -> Result<Chunk>;
-    /// Bytes a fetch of `key` reads, when the source knows without
-    /// fetching (a TIFF's tile byte counts); `None` otherwise.
-    fn stored_bytes(&self, _key: &ChunkKey) -> Option<u64> {
+    /// The byte ranges a fetch of `key` reads from its file, when the
+    /// source knows without fetching (a TIFF's tile offsets and byte
+    /// counts; one range per plane of a planar tile); `None` otherwise.
+    fn stored_ranges(&self, _key: &ChunkKey) -> Option<Vec<std::ops::Range<u64>>> {
         None
+    }
+    /// Bytes a fetch of `key` reads, when the source knows.
+    fn stored_bytes(&self, key: &ChunkKey) -> Option<u64> {
+        Some(
+            self.stored_ranges(key)?
+                .iter()
+                .map(|r| r.end - r.start)
+                .sum(),
+        )
     }
 }
 

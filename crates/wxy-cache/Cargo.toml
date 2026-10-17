@@ -1,0 +1,21 @@
+[package]
+name = "wxy-cache"
+description = "A persistent byte-range cache for wxylib readers, kept as append-only Parquet fragments (a reference table with the bytes)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+categories = ["science::geo", "caching"]
+
+[dependencies]
+async-tiff.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+parquet = { version = "60.0.0", default-features = false, features = ["arrow", "zstd"] }
+arrow-array = { version = "60.0.0", default-features = false }
+arrow-schema = { version = "60.0.0", default-features = false }
+sha2 = "0.11.1"
+
+[dev-dependencies]
+tokio.workspace = true
