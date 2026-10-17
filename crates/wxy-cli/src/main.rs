@@ -147,6 +147,10 @@ struct Warp {
     /// corners) instead of by its cell centres as GDAL does.
     #[arg(long)]
     bounds: bool,
+    /// Working memory one warp chunk may take, in MB, before it is split
+    /// into smaller chunks (gdalwarp's -wm).
+    #[arg(long, default_value_t = 64.0)]
+    wm: f64,
     /// Replace the output array if it exists.
     #[arg(long)]
     overwrite: bool,
@@ -473,6 +477,7 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         wrap_globe: !w.no_wrap,
         chunked: !w.plain,
         overview: w.overview,
+        memory_limit: w.wm * 1024.0 * 1024.0,
     };
     let widths: Vec<u64> = src.domains[1..]
         .iter()

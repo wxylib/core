@@ -104,6 +104,9 @@ pub struct WarpOptions {
     /// Which resolution level [`warp_pyramid`] reads (gdalwarp's `-ovr`).
     /// [`warp`] reads the one source it is given.
     pub overview: Overview,
+    /// Working memory, in bytes, one chunk of the chunked warp may take
+    /// before GDAL's planner splits it (gdalwarp's `-wm`; 64 MiB).
+    pub memory_limit: f64,
 }
 
 /// Overview choice for [`warp_pyramid`], as gdalwarp's `-ovr`.
@@ -161,6 +164,7 @@ impl Default for WarpOptions {
             wrap_globe: true,
             chunked: true,
             overview: Overview::Auto,
+            memory_limit: chunked::MEMORY_LIMIT,
         }
     }
 }
@@ -637,7 +641,7 @@ impl WarpPlan {
                     .ok_or_else(|| Error::Unsupported(format!("warping {dtype:?}")))?;
                 let t = transformer(&src, dst, opts)?;
                 let special = special_points(&src, dst);
-                let chunks = chunked::Planner::new(
+                let mut planner = chunked::Planner::new(
                     &t,
                     src.size(),
                     [dst.size[0] as i32, dst.size[1] as i32],
@@ -647,8 +651,9 @@ impl WarpPlan {
                     bits,
                     nodata.is_some(),
                     src.geoloc.is_none(),
-                )
-                .chunks();
+                );
+                planner.memory_limit = opts.memory_limit;
+                let chunks = planner.chunks();
                 let live: Vec<&chunked::Chunk> = chunks.iter().filter(|c| !c.is_empty()).collect();
                 if live.is_empty() {
                     Route::Empty

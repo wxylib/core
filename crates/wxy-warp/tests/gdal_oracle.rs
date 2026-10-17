@@ -10,7 +10,10 @@
 use std::path::PathBuf;
 
 use serde_json::Value;
-use wxy_warp::{choose_overview, warp, warp_pyramid, GridSpec, Overview, ResampleAlg, WarpOptions};
+use wxy_warp::{
+    choose_overview, warp, warp_pyramid, Detail, GridSpec, Overview, ResampleAlg, WarpOptions,
+    WarpPlan, BATCH_BYTES,
+};
 
 fn fixtures() -> PathBuf {
     std::env::var("WXY_FIXTURES")
@@ -101,9 +104,28 @@ async fn warps_match_gdal() {
                 resampling: alg(m),
                 wrap_globe: case["wrap_globe"].as_bool().unwrap_or(false),
                 overview,
+                // gdalwarp's -wm, in MB
+                memory_limit: case["warp_memory_mb"].as_f64().unwrap_or(64.0) * 1024.0 * 1024.0,
                 ..Default::default()
             };
             let level = choose_overview(&ds.collection.domains[0], &widths, &dst, &opts).unwrap();
+            // how many chunks GDAL's planner splits the warp into
+            let k = level.map_or(0, |k| k + 1);
+            let plan = WarpPlan::new(
+                &ds.collection.domains[k],
+                wxy_source::ChunkSource::dtype(&ds.levels[k]),
+                &dst,
+                &opts,
+                nodata,
+            )
+            .unwrap();
+            let Detail::Warp { warp_chunks, .. } = plan.explain(&ds.levels[k], BATCH_BYTES).detail
+            else {
+                unreachable!()
+            };
+            if case["warp_memory_mb"].as_f64().unwrap_or(64.0) < 64.0 {
+                assert!(warp_chunks.len() > 1, "{name}: one chunk under -wm");
+            }
             let want_level = case["overview_level"].as_u64().map(|k| k as usize);
             assert_eq!(level, want_level, "{name}: overview chosen");
             let out = warp_pyramid(&ds.levels, &ds.collection.domains, &dst, &opts, nodata)
@@ -116,7 +138,11 @@ async fn warps_match_gdal() {
             report.push((
                 true,
                 n,
-                format!("{name} {m}: {n} of {} cells differ (max {max})", want.len()),
+                format!(
+                    "{name} {m}: {n} of {} cells differ (max {max}), {} chunks",
+                    want.len(),
+                    warp_chunks.len()
+                ),
             ));
         }
     }

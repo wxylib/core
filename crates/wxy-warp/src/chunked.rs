@@ -22,7 +22,7 @@ use crate::Approx;
 /// GDAL's `DEFAULT_STEP_COUNT`.
 const STEPS: usize = 21;
 /// GDAL's default warp memory limit, 64 MB.
-const MEMORY_LIMIT: f64 = 64.0 * 1024.0 * 1024.0;
+pub(crate) const MEMORY_LIMIT: f64 = 64.0 * 1024.0 * 1024.0;
 
 /// One chunk of the target and the source window it reads.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,6 +84,9 @@ pub(crate) struct Planner<'a> {
     /// proj4rs's antipode). A curvilinear source's edges can wrap onto
     /// each other, so its points go back elsewhere; GDAL checks none.
     check_round_trip: bool,
+    /// Bytes a chunk's working memory may take before it is split
+    /// (GDAL's `dfWarpMemoryLimit`, gdalwarp's `-wm`).
+    pub memory_limit: f64,
 }
 
 impl<'a> Planner<'a> {
@@ -112,6 +115,7 @@ impl<'a> Planner<'a> {
             globe_width: globe.map(|g| g.0),
             pole_rows: globe.and_then(|g| g.1),
             check_round_trip,
+            memory_limit: MEMORY_LIMIT,
         }
     }
 
@@ -131,7 +135,7 @@ impl<'a> Planner<'a> {
         let memory = (self.src_bits * w.size[0] as f64 * w.size[1] as f64
             + self.dst_bits * size[0] as f64 * size[1] as f64)
             / 8.0;
-        let split = (memory > MEMORY_LIMIT && (size[0] > 2 || size[1] > 2))
+        let split = (memory > self.memory_limit && (size[0] > 2 || size[1] > 2))
             || (w.fill > 0.0 && w.fill < 0.5 && (size[0] > 100 || size[1] > 100));
         if split {
             if size[0] > size[1] {
