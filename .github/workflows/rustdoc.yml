@@ -1,0 +1,50 @@
+name: rustdoc
+
+# Build the workspace API docs and publish them to GitHub Pages at
+# https://wxylib.github.io/core/ (the root redirects to wxy_domain).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps
+      - name: Add a root index
+        run: |
+          cat > target/doc/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>wxylib/core API</title>
+          <meta http-equiv="refresh" content="0; url=wxy_domain/index.html">
+          <link rel="canonical" href="wxy_domain/index.html">
+          <p><a href="wxy_domain/index.html">wxy_domain</a> (all crates are in the sidebar)</p>
+          HTML
+          rm -f target/doc/.lock
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
