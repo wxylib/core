@@ -16,7 +16,7 @@
 //! says which was used, or `none`.
 //!
 //! The cache is a directory of append-only Parquet fragments partitioned
-//! by source (`<dir>/<source hash>/<run>.parquet`): a source's partition
+//! by source (`<dir>/ab/cd/<rest of source hash>/<run>.parquet`): a source's partition
 //! is loaded the first time it is asked for, and nothing is ever
 //! rewritten, so concurrent runs never contend. [`Cache::get`] and
 //! [`Cache::put`] are the format-free interface; [`Cache::reader`] wraps
@@ -173,9 +173,12 @@ fn schema() -> Arc<Schema> {
 }
 
 /// The partition directory of `source`: the first 16 hex digits of its
-/// sha256.
+/// sha256, fanned out as `ab/cd/ef0123456789` so that tens of millions of
+/// sources (a COG per time step) spread over 65536 directories of a few
+/// hundred partitions each, rather than one directory holding them all.
 pub fn partition(dir: impl AsRef<Path>, source: &str) -> PathBuf {
-    dir.as_ref().join(&sha256(source.as_bytes())[..16])
+    let h = sha256(source.as_bytes());
+    dir.as_ref().join(&h[..2]).join(&h[2..4]).join(&h[4..16])
 }
 
 /// The fragments of one partition directory, in name order.
@@ -195,13 +198,22 @@ fn partition_fragments(dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Every fragment in a cache directory, partition by partition.
 pub fn fragments(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+    // partitions sit three levels down (see `partition`)
+    let mut level = vec![dir.as_ref().to_path_buf()];
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for d in &level {
+            next.extend(
+                std::fs::read_dir(d)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.is_dir()),
+            );
+        }
+        next.sort();
+        level = next;
+    }
     let mut out = Vec::new();
-    let mut parts: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_dir())
-        .collect();
-    parts.sort();
-    for p in parts {
+    for p in level {
         out.extend(partition_fragments(&p)?);
     }
     Ok(out)

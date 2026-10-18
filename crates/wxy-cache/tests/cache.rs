@@ -93,8 +93,11 @@ async fn second_run_reads_nothing_from_the_source() {
     // a.tif's partition and starts b.tif's
     assert_eq!(cache.flush().unwrap().len(), 2);
     assert_eq!(fragments(&dir).unwrap().len(), 3);
-    let parts = std::fs::read_dir(&dir).unwrap().count();
-    assert_eq!(parts, 2);
+    let a = wxy_cache::partition(&dir, "s3://a.tif");
+    let b = wxy_cache::partition(&dir, "s3://b.tif");
+    assert_eq!(a.strip_prefix(&dir).unwrap().components().count(), 3);
+    assert_eq!(std::fs::read_dir(&a).unwrap().count(), 2);
+    assert_eq!(std::fs::read_dir(&b).unwrap().count(), 1);
 
     // no validator: cached and used, marked as unchecked
     let cache = Cache::open(&dir).unwrap();
