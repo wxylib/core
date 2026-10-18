@@ -1,9 +1,9 @@
 # wxylib/core
 
 The wxylib Cargo workspace. Design, decisions and roadmap are in
-[wxylib/design](https://github.com/wxylib/design). New here? Start with the
-[intro page](https://github.com/wxylib/docs#readme). API docs for every
-crate: [wxylib.github.io/core](https://wxylib.github.io/core/).
+[wxylib/design](https://github.com/wxylib/design). New here? Start at
+**https://wxylib.github.io/docs/**. API docs for every crate:
+[wxylib.github.io/core](https://wxylib.github.io/core/).
 
 | Crate | Stage | What it is |
 |-------|-------|------------|
@@ -48,12 +48,12 @@ cargo run -p wxy-cli -- warp ../fixtures/cog/world-int16-deflate.tif out.zarr \
 
 The tests compare every read, warp, point read and polygon with what GDAL
 gives for the same input, and require identical numbers; the
-[intro page](https://github.com/wxylib/docs#what-the-tests-check) lists the
+[testing explainer](https://wxylib.github.io/docs/explainers/testing.html) lists the
 cases. They look for wxylib/fixtures at `../fixtures`, or at
 `WXY_FIXTURES`, and skip when it is missing.
 
 A worked example on real data: the
-[OISST walk-through](https://github.com/wxylib/docs/blob/main/oisst-virtual.md)
+[OISST walk-through](https://wxylib.github.io/docs/oisst-virtual.html)
 reads a month of NOAA sea surface temperature as virtual Zarr
 (`cargo run -p wxy-virtual --example oisst_refs`).
 
