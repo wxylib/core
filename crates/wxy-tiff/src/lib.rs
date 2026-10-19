@@ -94,22 +94,25 @@ pub fn url_reader(url: &str) -> Result<Arc<dyn AsyncFileReader>> {
 
 /// An HTTP(S) URL as an object store (its scheme and host) and the
 /// location within it (its path).
+///
+/// Not `object_store::parse_url`: that sends https URLs on
+/// `*.amazonaws.com` (and Azure, R2) to the signed S3 store, which a
+/// public COG URL neither needs nor, without the `aws` feature and
+/// credentials, can use. Its HTTP arm is this, so the result matches.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn url_store(
     url: &str,
 ) -> Result<(Arc<dyn object_store::ObjectStore>, object_store::path::Path)> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| Error::Fetch(format!("not an http(s) URL: {url}")))?;
-    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let base = &url[..url.len() - rest.len() + host.len()];
+    let parsed = url::Url::parse(url).map_err(|e| Error::Fetch(format!("{url}: {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(Error::Fetch(format!("not an http(s) URL: {url}")));
+    }
     let store = object_store::http::HttpBuilder::new()
-        .with_url(base)
+        .with_url(&parsed[..url::Position::BeforePath])
         .build()
         .map_err(|e| Error::Fetch(e.to_string()))?;
-    let location =
-        object_store::path::Path::from_url_path(path).map_err(|e| Error::Fetch(e.to_string()))?;
+    let location = object_store::path::Path::from_url_path(parsed.path())
+        .map_err(|e| Error::Fetch(e.to_string()))?;
     Ok((Arc::new(store), location))
 }
 
@@ -431,5 +434,9 @@ mod url_tests {
         assert!(url_store("s3://bucket/key.tif").is_err());
         assert!(is_url("http://example.org/x.tif"));
         assert!(!is_url("/data/x.tif"));
+        // a plain HTTP read, where parse_url would pick the S3 store
+        let s3 = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/a/TCI.tif";
+        let (_, loc) = url_store(s3).unwrap();
+        assert_eq!(loc.as_ref(), "a/TCI.tif");
     }
 }
