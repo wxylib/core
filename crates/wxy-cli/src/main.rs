@@ -34,7 +34,7 @@ enum Command {
 
 #[derive(Parser)]
 struct Zonal {
-    /// Source: a GeoTIFF file, or a Zarr store directory.
+    /// Source: a GeoTIFF file or https:// URL, or a Zarr store directory.
     source: PathBuf,
     /// GeoJSON: a FeatureCollection, a Feature, or a bare geometry, of
     /// Polygon or MultiPolygon.
@@ -64,7 +64,7 @@ struct Zonal {
 
 #[derive(Parser)]
 struct Points {
-    /// Source: a GeoTIFF file, or a Zarr store directory.
+    /// Source: a GeoTIFF file or https:// URL, or a Zarr store directory.
     source: PathBuf,
     /// CRS of the points (EPSG:NNNN or a PROJ string).
     #[arg(long, default_value = "EPSG:4326")]
@@ -99,7 +99,7 @@ enum PointResampling {
 
 #[derive(Parser)]
 struct Warp {
-    /// Source: a GeoTIFF file, or a Zarr store directory.
+    /// Source: a GeoTIFF file or https:// URL, or a Zarr store directory.
     source: PathBuf,
     /// Output Zarr store directory, created if missing.
     output: PathBuf,
@@ -149,7 +149,8 @@ struct Warp {
     bounds: bool,
     /// Keep the source's bytes, as fetched, in this cache directory
     /// (append-only Parquet fragments) and read from it what it already
-    /// holds. GeoTIFF sources only.
+    /// holds. GeoTIFF sources only (files or URLs); URL rows are
+    /// validated by the server's etag.
     #[arg(long, value_name = "DIR")]
     cache: Option<PathBuf>,
     /// Working memory one warp chunk may take, in MB, before it is split
@@ -219,6 +220,34 @@ async fn open_cached(
     array: &str,
     cache: Option<&std::sync::Arc<wxy_cache::Cache>>,
 ) -> Result<Opened, Failure> {
+    let url = path.to_str().filter(|s| wxy_tiff::is_url(s));
+    if let Some(url) = url {
+        // read by range requests; the cache validates rows by the etag
+        let reader = wxy_tiff::url_reader(url)?;
+        let (reader, cache_key) = match cache {
+            Some(cache) => {
+                let validator = match wxy_tiff::url_etag(url).await? {
+                    Some(e) => wxy_cache::Validator::Etag(e),
+                    None => wxy_cache::Validator::None,
+                };
+                let r = cache.reader(reader, url, url, validator.clone());
+                (r, Some((url.to_string(), validator)))
+            }
+            None => (reader, None),
+        };
+        let ds = wxy_tiff::open(reader).await?;
+        let c = ds.collection;
+        return Ok(Opened {
+            levels: ds
+                .levels
+                .into_iter()
+                .map(|l| Box::new(l) as Box<dyn ChunkSource>)
+                .collect(),
+            nodata: c.fields[0].values.nodata,
+            domains: c.domains,
+            cache_key,
+        });
+    }
     if let Some(cache) = cache {
         if path.is_dir() {
             return Err("--cache reads GeoTIFF sources only, for now".into());
