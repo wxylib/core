@@ -8,8 +8,9 @@
 //! values) sit beside it. This module reads the table's exported form, one
 //! `refs_<array>.parquet` per referenced array plus `arrays.json` (the
 //! `arrays`, `remap` and `meta` tables), and turns it into
-//! [`VirtualArray`]s for [`crate::write_icechunk`]. The table is not
-//! copied into a format of our own: Icechunk is where it is written.
+//! [`VirtualArray`]s, which [`crate::RefsStore`] serves to zarrs directly
+//! and `wxy_virtual::write_icechunk` can write to Icechunk. The table is
+//! not copied into a format of our own.
 //!
 //! - v2 codecs become Zarr v3: `bytes` with the dtype's byte order, then
 //!   `shuffle` as `numcodecs.shuffle`, then `zlib` as `numcodecs.zlib`
@@ -499,6 +500,7 @@ fn read_refs(
             };
             out.push(ChunkRef {
                 key,
+                source: p.to_string(),
                 url: u,
                 offset: offset.value(r) as u64,
                 length: size.value(r) as u64,
@@ -592,6 +594,7 @@ mod tests {
             a.refs,
             vec![ChunkRef {
                 key: vec![0, 0],
+                source: "/src/a.bin".into(),
                 url: format!("file://{}", local.display()),
                 offset: 4,
                 length: 8,

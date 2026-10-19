@@ -15,6 +15,7 @@ The wxylib Cargo workspace. Design, decisions and roadmap are in
 | [`wxy-virtual`](crates/wxy-virtual) | S3b | Scanners to virtual Zarr: TIFF tile byte ranges as Icechunk virtual references, read back through zarrs. |
 | [`wxy-resample`](crates/wxy-resample) | S5 | GDAL's warp kernels in its arithmetic order, scaled when the target is coarser than the source. No transforms, no I/O. |
 | [`wxy-warp`](crates/wxy-warp) | S4 to S5b | Plan, fetch, resample: GDAL's chunked warp with `wxy-resample` kernels, or one pass through [rwarp](https://github.com/hypertidy/rwarp); regular, rectilinear and curvilinear sources, extra dimensions streamed under one plan; values at points and cells under polygons, each chunk fetched once. |
+| [`wxy-refs`](crates/wxy-refs) | S3c | Byte-reference tables (the mdim-refs Parquet export) read straight as Zarr storage: chunks fetched by range from `file://`, `http(s)://` or `s3://` (credentials and endpoint from `AWS_*`), through `wxy-cache` when given; no Icechunk repository in between. |
 | [`wxy-cache`](crates/wxy-cache) | m05 C1 | A persistent byte-range cache: wraps a reader, keeps what it fetches (still encoded) as append-only Parquet rows `(source, offset, size, url, data, hash, validator)`, partitioned by source: a reference table with the bytes. |
 | [`wxy-cli`](crates/wxy-cli) | S4, S4c | The `wxy` command: `warp` (to a GeoZarr grid), `points` and `zonal` (CSV out). |
 
@@ -51,6 +52,11 @@ cargo run -p wxy-cli -- zonal ../fixtures/cog/world-int16-deflate.tif box.geojso
 # and --dry-run --cache says how much of a plan the cache already holds
 cargo run -p wxy-cli -- warp ../fixtures/cog/world-int16-deflate.tif out.zarr \
   --crs EPSG:3031 --extent -4e6 -4e6 4e6 4e6 --size 145 145 --cache cache --overwrite
+
+# a byte-reference table as the source, read straight from the table;
+# --remap picks the table's remap target (here, the fixture's local copies)
+cargo run -p wxy-cli -- warp ../fixtures/mdimrefs sst.zarr --source-array /sst \
+  --remap fixture --crs EPSG:3031 --extent -4e6 -4e6 4e6 4e6 --size 100 100 --cache cache
 ```
 
 The tests compare every read, warp, point read and polygon with what GDAL

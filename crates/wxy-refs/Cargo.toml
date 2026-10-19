@@ -1,0 +1,30 @@
+[package]
+name = "wxy-refs"
+description = "Byte-reference tables (mdim-refs) read directly as Zarr storage, with a byte-range cache inside"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+wxy-domain.workspace = true
+wxy-source.workspace = true
+wxy-geozarr.workspace = true
+wxy-zarr = { path = "../wxy-zarr", version = "0.0.1" }
+wxy-cache = { path = "../wxy-cache", version = "0.0.1" }
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+object_store = { workspace = true, features = ["aws", "http"] }
+serde_json = "1"
+tokio = { version = "1.43", features = ["sync"] }
+url = "2.5"
+zarrs = { version = "0.23.14", default-features = false, features = ["async"] }
+parquet = { version = "60.0.0", default-features = false, features = ["arrow", "zstd", "snap"] }
+arrow-array = { version = "60.0.0", default-features = false }
+arrow-schema = { version = "60.0.0", default-features = false }
+arrow-cast = { version = "60.0.0", default-features = false }
+
+[dev-dependencies]
+tokio.workspace = true

@@ -12,8 +12,13 @@
 //! SHA-256 (`--oracle`), otherwise summarised. Reads need network access to
 //! thredds.nci.org.au; not a test.
 //!
+//! With `--direct` the table is read straight through `wxy_refs::RefsStore`
+//! (doc 03, S3c) instead of an Icechunk repository, so the two read paths
+//! can be checked against the same GDAL hashes.
+//!
 //! ```sh
 //! cargo run --release -p wxy-virtual --example bran_refs -- ../fixtures/mdimrefs/bran2023-temp-201001
+//! cargo run --release -p wxy-virtual --example bran_refs -- ../fixtures/mdimrefs/bran2023-temp-201001 --direct
 //! ```
 
 use std::path::PathBuf;
@@ -25,8 +30,10 @@ use wxy_source::{read_window, ChunkSource, Window};
 
 #[tokio::main]
 async fn main() {
+    let direct = std::env::args().any(|a| a == "--direct");
     let dir = std::env::args()
-        .nth(1)
+        .skip(1)
+        .find(|a| !a.starts_with("--"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("../fixtures/mdimrefs/bran2023-temp-201001"));
     let manifest: Value =
@@ -43,9 +50,15 @@ async fn main() {
     let repo = std::env::temp_dir().join(format!("wxy-bran-refs-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&repo);
     let t0 = Instant::now();
-    wxy_virtual::write_icechunk(&repo, &arrays).await.unwrap();
-    println!("Icechunk written in {:.2} s", t0.elapsed().as_secs_f64());
-    let storage = wxy_virtual::open_icechunk(&repo, &prefixes).await.unwrap();
+    let storage: std::sync::Arc<dyn zarrs::storage::AsyncReadableStorageTraits> = if direct {
+        let s = wxy_refs::RefsStore::new(&arrays, None).unwrap();
+        println!("refs store built in {:.2} s", t0.elapsed().as_secs_f64());
+        std::sync::Arc::new(s)
+    } else {
+        wxy_virtual::write_icechunk(&repo, &arrays).await.unwrap();
+        println!("Icechunk written in {:.2} s", t0.elapsed().as_secs_f64());
+        wxy_virtual::open_icechunk(&repo, &prefixes).await.unwrap()
+    };
     let ds = wxy_zarr::open(storage, "temp").await.unwrap();
     let grid = ds.source.grid();
     println!("temp: shape {:?}, chunks {:?}", grid.shape, grid.chunk);

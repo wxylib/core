@@ -1100,3 +1100,65 @@ async fn a_cached_warp_reads_nothing_the_second_time() {
         .collect();
     assert_eq!(keys, planned);
 }
+
+/// S3c: a byte-reference table (fixtures mdimrefs/) as a `wxy warp`
+/// source, read straight from the table with `--remap` to the local
+/// copies (whose windows match GDAL's; see wxy-refs tests); with
+/// `--cache` the second run reads nothing from the netCDF files and
+/// writes the same values.
+#[tokio::test]
+async fn a_refs_table_warps_through_the_cache() {
+    let src = fixtures().join("mdimrefs");
+    if !src.join("arrays.json").exists() {
+        eprintln!("skipping: no mdimrefs fixtures at {}", src.display());
+        return;
+    }
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("refs-warp");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let cache = tmp.join("cache");
+    let wxy = |out: &str, extra: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_wxy"))
+            .arg("warp")
+            .arg(&src)
+            .arg(tmp.join(out))
+            .args(["--source-array", "/sst", "--remap", "fixture"])
+            .args([
+                "--crs",
+                "EPSG:3031",
+                "--extent",
+                "-4e6",
+                "-4e6",
+                "4e6",
+                "4e6",
+            ])
+            .args(["--size", "100", "100", "-r", "bilinear", "--cache"])
+            .arg(&cache)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        o
+    };
+    let dry =
+        || -> Value { serde_json::from_slice(&wxy("dry.zarr", &["--dry-run"]).stdout).unwrap() };
+    let before = dry();
+    assert_eq!(before["fetch"]["chunks"], 3);
+    assert_eq!(before["fetch"]["cache"]["missing"], 3);
+    let first = String::from_utf8(wxy("a.zarr", &[]).stderr).unwrap();
+    assert!(first.contains(", 3 from the source"), "{first}");
+    let after = dry();
+    assert_eq!(after["fetch"]["cache"]["held"], 3);
+    assert_eq!(
+        after["fetch"]["cache"]["held_bytes"],
+        before["fetch"]["cache"]["missing_bytes"]
+    );
+    let second = String::from_utf8(wxy("b.zarr", &[]).stderr).unwrap();
+    assert!(second.contains(", 0 from the source (0 bytes)"), "{second}");
+    let (a, b) = (
+        read_all(&tmp.join("a.zarr")).await,
+        read_all(&tmp.join("b.zarr")).await,
+    );
+    assert_eq!(a.len(), 3 * 100 * 100);
+    assert!(a.iter().any(|v| *v != -999.0));
+    assert_eq!(a, b);
+}

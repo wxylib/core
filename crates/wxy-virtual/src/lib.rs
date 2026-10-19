@@ -15,6 +15,8 @@
 //!
 //! [`refs`] reads a byte-reference table (mdim-refs, one row per chunk) as
 //! a second source: the table is the scan, already done by someone else.
+//! It lives in [`wxy_refs`], which also reads such a table directly, with
+//! no Icechunk repository in between (doc 03, S3c).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,37 +29,14 @@ use icechunk::format::ChunkIndices;
 use icechunk::repository::VersionInfo;
 use icechunk::virtual_chunks::VirtualChunkContainer;
 use icechunk::{ObjectStoreConfig, Repository, RepositoryConfig, Store};
-use serde_json::{json, Value};
+use serde_json::json;
 use wxy_domain::{Frame, Positions};
 use wxy_source::{ChunkSource, Error, Result};
 use zarrs::storage::AsyncReadableStorageTraits;
 
-#[cfg(feature = "refs")]
-pub mod refs;
-#[cfg(feature = "refs")]
-pub use refs::from_refs_table;
-
-/// A reference to one stored chunk: its key in the Zarr chunk grid and the
-/// bytes that hold it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChunkRef {
-    pub key: Vec<u64>,
-    pub url: String,
-    pub offset: u64,
-    pub length: u64,
-}
-
-/// One virtual array: where it goes in the hierarchy, its Zarr v3
-/// metadata (`zarr.json`), its chunk references, and any chunks small
-/// enough to store inline (encoded bytes by chunk key, such as coordinate
-/// values). Chunks with neither read as the fill value.
-#[derive(Debug, Clone)]
-pub struct VirtualArray {
-    pub path: String,
-    pub metadata: Value,
-    pub refs: Vec<ChunkRef>,
-    pub inline: Vec<(Vec<u64>, Vec<u8>)>,
-}
+/// Byte-reference tables, now in [`wxy_refs`].
+pub use wxy_refs::table as refs;
+pub use wxy_refs::{from_refs_table, ChunkRef, VirtualArray};
 
 /// Scan level 0 of a local TIFF into a virtual array at `/data`.
 pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
@@ -122,6 +101,7 @@ pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
                 }
                 refs.push(ChunkRef {
                     key: vec![p, ty, tx],
+                    source: url.clone(),
                     url: url.clone(),
                     offset,
                     length,

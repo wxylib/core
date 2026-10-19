@@ -149,10 +149,14 @@ struct Warp {
     bounds: bool,
     /// Keep the source's bytes, as fetched, in this cache directory
     /// (append-only Parquet fragments) and read from it what it already
-    /// holds. GeoTIFF sources only (files or URLs); URL rows are
-    /// validated by the server's etag.
+    /// holds. GeoTIFF sources (files or URLs; URL rows are validated by the
+    /// server's etag) and byte-reference tables.
     #[arg(long, value_name = "DIR")]
     cache: Option<PathBuf>,
+    /// For a byte-reference table source, the `remap` target its source
+    /// paths are rewritten by (such as a mirror, or local copies).
+    #[arg(long, value_name = "TARGET")]
+    remap: Option<String>,
     /// Working memory one warp chunk may take, in MB, before it is split
     /// into smaller chunks (gdalwarp's -wm).
     #[arg(long, default_value_t = 64.0)]
@@ -206,10 +210,20 @@ struct Opened {
     nodata: Option<f64>,
     /// The source and version the cache keeps this source's bytes under.
     cache_key: Option<(String, wxy_cache::Validator)>,
+    /// A byte-reference table source: the store its chunks are read
+    /// through, and the array's path in it.
+    refs: Option<(std::sync::Arc<wxy_refs::RefsStore>, String)>,
 }
 
 async fn open(path: &Path, array: &str) -> Result<Opened, Failure> {
-    open_cached(path, array, None).await
+    open_cached(path, array, None, None).await
+}
+
+/// A byte-reference table (a directory holding the mdim-refs export,
+/// `arrays.json` beside `refs_<array>.parquet`): read straight from the
+/// table, chunks fetched from their sources (through `cache` when given).
+fn is_refs_table(path: &Path) -> bool {
+    path.join("arrays.json").is_file()
 }
 
 /// Open a source, its bytes read through `cache` when given (GeoTIFF
@@ -219,7 +233,22 @@ async fn open_cached(
     path: &Path,
     array: &str,
     cache: Option<&std::sync::Arc<wxy_cache::Cache>>,
+    remap: Option<&str>,
 ) -> Result<Opened, Failure> {
+    if is_refs_table(path) {
+        let arrays = wxy_refs::from_refs_table(path, remap)?;
+        let store = std::sync::Arc::new(wxy_refs::RefsStore::new(&arrays, cache.cloned())?);
+        let name = array.trim_start_matches('/');
+        let ds = wxy_zarr::open(store.clone(), name).await?;
+        let mut c = ds.collection;
+        return Ok(Opened {
+            levels: vec![Box::new(ds.source)],
+            nodata: c.fields[0].values.nodata,
+            domains: vec![c.domains.swap_remove(0)],
+            cache_key: None,
+            refs: Some((store, name.to_string())),
+        });
+    }
     let url = path.to_str().filter(|s| wxy_tiff::is_url(s));
     if let Some(url) = url {
         // read by range requests; the cache validates rows by the etag
@@ -246,6 +275,7 @@ async fn open_cached(
             nodata: c.fields[0].values.nodata,
             domains: c.domains,
             cache_key,
+            refs: None,
         });
     }
     if let Some(cache) = cache {
@@ -278,6 +308,7 @@ async fn open_cached(
             nodata: c.fields[0].values.nodata,
             domains: c.domains,
             cache_key: Some((url, validator)),
+            refs: None,
         });
     }
     if path.is_dir() {
@@ -288,6 +319,7 @@ async fn open_cached(
             nodata: c.fields[0].values.nodata,
             domains: vec![c.domains.swap_remove(0)],
             cache_key: None,
+            refs: None,
         })
     } else {
         let ds = wxy_tiff::open_path(path).await?;
@@ -301,6 +333,7 @@ async fn open_cached(
             nodata: c.fields[0].values.nodata,
             domains: c.domains,
             cache_key: None,
+            refs: None,
         })
     }
 }
@@ -549,6 +582,36 @@ fn cache_summary(
     s
 }
 
+/// [`cache_summary`] for a byte-reference table source, by the range the
+/// table gives each chunk.
+async fn refs_cache_summary(
+    cache: &wxy_cache::Cache,
+    store: &wxy_refs::RefsStore,
+    name: &str,
+    e: &wxy_warp::Explain,
+) -> Result<wxy_warp::CacheSummary, Failure> {
+    let mut s = wxy_warp::CacheSummary {
+        dir: cache.dir().display().to_string(),
+        held: 0,
+        held_bytes: 0,
+        missing: 0,
+        missing_bytes: 0,
+    };
+    for k in &e.fetch.keys {
+        // a chunk the table does not reference reads as fill: no fetch
+        if let Some((held, bytes)) = store.cached(&wxy_refs::chunk_key(name, k)).await? {
+            if held {
+                s.held += 1;
+                s.held_bytes += bytes;
+            } else {
+                s.missing += 1;
+                s.missing_bytes += bytes;
+            }
+        }
+    }
+    Ok(s)
+}
+
 /// A plan as JSON on stdout, with where its source came from.
 fn print_plan(mut e: wxy_warp::Explain, source: &Path, level: usize) -> Result<(), Failure> {
     e.source.path = Some(source.display().to_string());
@@ -576,7 +639,13 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         .into());
     }
     let cache = w.cache.as_ref().map(wxy_cache::Cache::open).transpose()?;
-    let mut src = open_cached(&w.source, &w.source_array, cache.as_ref()).await?;
+    let mut src = open_cached(
+        &w.source,
+        &w.source_array,
+        cache.as_ref(),
+        w.remap.as_deref(),
+    )
+    .await?;
     if w.bounds {
         use_bounds(&mut src.domains[0])?;
     }
@@ -613,6 +682,9 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         if let (Some(cache), Some((source, validator))) = (&cache, &src.cache_key) {
             e.fetch.cache = Some(cache_summary(cache, source, validator, level, &e));
         }
+        if let (Some(cache), Some((store, name))) = (&cache, &src.refs) {
+            e.fetch.cache = Some(refs_cache_summary(cache, store, name, &e).await?);
+        }
         return print_plan(e, &w.source, k);
     }
     let mut shape = plan.leading().to_vec();
@@ -632,7 +704,14 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         let buf = plan.warp_slices(level, &batch).await?;
         out.write_window(&buf.window, &buf.values).await?;
     }
-    if let Some(cache) = &cache {
+    if let (Some(cache), Some((store, _))) = (&cache, &src.refs) {
+        cache.flush()?;
+        let s = store.stats();
+        eprintln!(
+            "cache: {} reads held ({} bytes), {} from the source ({} bytes)",
+            s.hits, s.hit_bytes, s.misses, s.miss_bytes
+        );
+    } else if let Some(cache) = &cache {
         cache.flush()?;
         let s = cache.stats();
         eprintln!(

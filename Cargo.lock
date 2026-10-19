@@ -5069,6 +5069,7 @@ dependencies = [
  "tokio",
  "wxy-cache",
  "wxy-domain",
+ "wxy-refs",
  "wxy-source",
  "wxy-tiff",
  "wxy-virtual",
@@ -5089,6 +5090,29 @@ version = "0.0.1"
 dependencies = [
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "wxy-refs"
+version = "0.0.1"
+dependencies = [
+ "arrow-array",
+ "arrow-cast",
+ "arrow-schema",
+ "async-trait",
+ "bytes",
+ "futures",
+ "object_store",
+ "parquet",
+ "serde_json",
+ "tokio",
+ "url",
+ "wxy-cache",
+ "wxy-domain",
+ "wxy-geozarr",
+ "wxy-source",
+ "wxy-zarr",
+ "zarrs",
 ]
 
 [[package]]
@@ -5124,18 +5148,15 @@ dependencies = [
 name = "wxy-virtual"
 version = "0.0.1"
 dependencies = [
- "arrow-array",
- "arrow-cast",
- "arrow-schema",
  "async-tiff",
  "async-trait",
  "icechunk",
- "parquet",
  "serde_json",
  "sha2 0.11.1",
  "tokio",
  "wxy-domain",
  "wxy-geozarr",
+ "wxy-refs",
  "wxy-source",
  "wxy-tiff",
  "wxy-warp",
