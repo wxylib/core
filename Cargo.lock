@@ -5115,6 +5115,7 @@ dependencies = [
  "object_store",
  "serde_json",
  "tokio",
+ "url",
  "wxy-domain",
  "wxy-source",
 ]

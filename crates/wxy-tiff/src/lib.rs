@@ -77,6 +77,62 @@ pub fn path_reader(path: impl AsRef<std::path::Path>) -> Result<Arc<dyn AsyncFil
     Ok(Arc::new(ObjectReader::new(store, location)))
 }
 
+/// Open a GeoTIFF or COG over HTTP(S). Only the bytes asked for are
+/// fetched, by range requests: the header, then the tiles a read needs.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn open_url(url: &str) -> Result<TiffDataset> {
+    open(url_reader(url)?).await
+}
+
+/// The byte reader [`open_url`] uses, for wrapping (a cache) before
+/// [`open`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn url_reader(url: &str) -> Result<Arc<dyn AsyncFileReader>> {
+    let (store, location) = url_store(url)?;
+    Ok(Arc::new(ObjectReader::new(store, location)))
+}
+
+/// An HTTP(S) URL as an object store (its scheme and host) and the
+/// location within it (its path).
+///
+/// Not `object_store::parse_url`: that sends https URLs on
+/// `*.amazonaws.com` (and Azure, R2) to the signed S3 store, which a
+/// public COG URL neither needs nor, without the `aws` feature and
+/// credentials, can use. Its HTTP arm is this, so the result matches.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn url_store(
+    url: &str,
+) -> Result<(Arc<dyn object_store::ObjectStore>, object_store::path::Path)> {
+    let parsed = url::Url::parse(url).map_err(|e| Error::Fetch(format!("{url}: {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(Error::Fetch(format!("not an http(s) URL: {url}")));
+    }
+    let store = object_store::http::HttpBuilder::new()
+        .with_url(&parsed[..url::Position::BeforePath])
+        .build()
+        .map_err(|e| Error::Fetch(e.to_string()))?;
+    let location = object_store::path::Path::from_url_path(parsed.path())
+        .map_err(|e| Error::Fetch(e.to_string()))?;
+    Ok((Arc::new(store), location))
+}
+
+/// The server's etag for a URL, by a HEAD request, when it sends one.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn url_etag(url: &str) -> Result<Option<String>> {
+    use object_store::ObjectStoreExt;
+    let (store, location) = url_store(url)?;
+    let meta = store
+        .head(&location)
+        .await
+        .map_err(|e| Error::Fetch(e.to_string()))?;
+    Ok(meta.e_tag)
+}
+
+/// Whether a source names an HTTP(S) URL rather than a local path.
+pub fn is_url(source: &str) -> bool {
+    source.starts_with("https://") || source.starts_with("http://")
+}
+
 /// Open from any object store location.
 pub async fn open_store(
     store: Arc<dyn object_store::ObjectStore>,
@@ -364,5 +420,23 @@ fn to_band_major(data: TypedArray, planar: bool, bands: usize, h: usize, w: usiz
         TypedArray::Int64(v) => Values::I64(reorder(v, planar, bands, h, w)),
         TypedArray::Float32(v) => Values::F32(reorder(v, planar, bands, h, w)),
         TypedArray::Float64(v) => Values::F64(reorder(v, planar, bands, h, w)),
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn url_splits_into_store_and_location() {
+        let (_, loc) = url_store("https://example.org/a/b%20c/d.tif").unwrap();
+        assert_eq!(loc.as_ref(), "a/b c/d.tif");
+        assert!(url_store("s3://bucket/key.tif").is_err());
+        assert!(is_url("http://example.org/x.tif"));
+        assert!(!is_url("/data/x.tif"));
+        // a plain HTTP read, where parse_url would pick the S3 store
+        let s3 = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/a/TCI.tif";
+        let (_, loc) = url_store(s3).unwrap();
+        assert_eq!(loc.as_ref(), "a/TCI.tif");
     }
 }

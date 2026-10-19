@@ -36,6 +36,13 @@ printf '147.3,-42.9\n-70.6,-33.4\n' |
 echo '{"type":"Polygon","coordinates":[[[140,-45],[150,-45],[150,-38],[140,-38],[140,-45]]]}' > box.geojson
 cargo run -p wxy-cli -- zonal ../fixtures/cog/world-int16-deflate.tif box.geojson --coverage
 
+# a COG straight from a URL, by range requests: only the header and the
+# tiles of the overview the target needs are fetched (here 9 tiles,
+# about 4 MB, of a 284 MB Sentinel-2 image)
+cargo run -p wxy-cli -- warp \
+  https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/55/G/EN/2024/2/S2B_55GEN_20240203_0_L2A/TCI.tif \
+  hobart.zarr --crs EPSG:4326 --extent 147.1 -43.1 147.6 -42.75 --size 1000 700
+
 # any of them with --dry-run: the plan as JSON (every chunk it would
 # fetch, the bytes that costs, how the warp is chunked), reading no data
 cargo run -p wxy-cli -- zonal ../fixtures/cog/world-int16-deflate.tif box.geojson --dry-run
