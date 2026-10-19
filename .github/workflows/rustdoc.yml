@@ -1,7 +1,7 @@
 name: rustdoc
 
 # Build the workspace API docs and publish them to GitHub Pages at
-# https://wxylib.github.io/core/ (the root redirects to wxy_domain).
+# https://wxylib.org/core/ (the root redirects to wxy_domain).
 
 on:
   push:
