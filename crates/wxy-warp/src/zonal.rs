@@ -48,22 +48,22 @@ pub enum ZoneCells {
 /// whole cells, the covered fraction for a coverage edge cell, negative
 /// for a hole's.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Span {
-    row: u32,
-    c0: u32,
-    c1: u32,
-    w: f32,
+pub(crate) struct Span {
+    pub(crate) row: u32,
+    pub(crate) c0: u32,
+    pub(crate) c1: u32,
+    pub(crate) w: f32,
 }
 
 /// Polygon vertices to source index space.
-struct Burner {
-    t: Approx,
-    h: u64,
-    w: u64,
+pub(crate) struct Burner {
+    pub(crate) t: Approx,
+    pub(crate) h: u64,
+    pub(crate) w: u64,
 }
 
 impl Burner {
-    fn new(domain: &Domain, crs: &str) -> Result<Self> {
+    pub(crate) fn new(domain: &Domain, crs: &str) -> Result<Self> {
         let src = SourceGrid::from_domain(domain)?;
         let points = GridSpec {
             crs: crs.into(),
@@ -112,13 +112,56 @@ impl Burner {
         spans
     }
 
+    /// One ring's vertices in index space as `(pixel, line)`. With
+    /// `densify`, every edge longer than that many cells once moved is cut
+    /// into equal pieces in the polygon's CRS, which are moved too, so the
+    /// ring follows the curve a straight edge becomes on a grid that is not
+    /// affine in the polygon's CRS. The count is of vertices that did not
+    /// transform (off a curvilinear grid's arrays).
+    pub(crate) fn index_ring(
+        &self,
+        r: &[[f64; 2]],
+        densify: Option<f64>,
+    ) -> (Vec<[f64; 2]>, usize) {
+        let (mut x, mut y): (Vec<f64>, Vec<f64>) = r.iter().map(|p| (p[0], p[1])).unzip();
+        let mut ok = rwarp::Transformer::transform(&self.t, true, &mut x, &mut y);
+        if let Some(step) = densify.filter(|s| *s > 0.0) {
+            let (mut wx, mut wy) = (Vec::new(), Vec::new());
+            for i in 0..r.len().saturating_sub(1) {
+                let len = (x[i + 1] - x[i]).hypot(y[i + 1] - y[i]);
+                let n = if ok[i] && ok[i + 1] && len.is_finite() {
+                    (len / step).ceil().max(1.0) as usize
+                } else {
+                    1
+                };
+                for k in 0..n {
+                    let t = k as f64 / n as f64;
+                    wx.push(r[i][0] + t * (r[i + 1][0] - r[i][0]));
+                    wy.push(r[i][1] + t * (r[i + 1][1] - r[i][1]));
+                }
+            }
+            if let Some(last) = r.last() {
+                wx.push(last[0]);
+                wy.push(last[1]);
+            }
+            ok = rwarp::Transformer::transform(&self.t, true, &mut wx, &mut wy);
+            (x, y) = (wx, wy);
+        }
+        let failed = ok.iter().filter(|o| !**o).count();
+        (x.into_iter().zip(y).map(|(x, y)| [x, y]).collect(), failed)
+    }
+
     /// Exact cover of every feature (each a set of polygons), from
     /// controlledburn in index space. Each ring is burned alone and holes
     /// subtracted: controlledburn 0.2.1 drops a hole's boundary cells where
     /// the exterior covers them (a patch is with hypertidy). The holes of a
     /// valid polygon lie inside its exterior and apart, so the signed sum
     /// is exact.
-    fn coverage(&self, features: &[Vec<Rings>]) -> Result<Vec<Vec<Span>>> {
+    pub(crate) fn coverage(
+        &self,
+        features: &[Vec<Rings>],
+        densify: Option<f64>,
+    ) -> Result<Vec<Vec<Span>>> {
         use controlledburn::{burn, BurnOptions, Coord, Geometry, GridSpec as BurnGrid, Polygon};
         // index space with y up: (pixel, -line) on a grid of unit cells
         let grid = BurnGrid::new(
@@ -133,10 +176,8 @@ impl Burner {
         for (k, polys) in features.iter().enumerate() {
             for rings in polys {
                 for (i, r) in rings.iter().enumerate() {
-                    let (mut x, mut y): (Vec<f64>, Vec<f64>) =
-                        r.iter().map(|p| (p[0], p[1])).unzip();
-                    rwarp::Transformer::transform(&self.t, true, &mut x, &mut y);
-                    let ring = x.iter().zip(&y).map(|(&x, &y)| Coord::new(x, -y)).collect();
+                    let (ring, _) = self.index_ring(r, densify);
+                    let ring = ring.iter().map(|p| Coord::new(p[0], -p[1])).collect();
                     geoms.push(Geometry::Polygon(Polygon::new(vec![ring])));
                     owner.push((k, if i == 0 { 1.0f32 } else { -1.0 }));
                 }
@@ -205,21 +246,24 @@ pub fn polygon_coverage(
 ) -> Result<Vec<Vec<CellCover>>> {
     let b = Burner::new(domain, crs)?;
     let features: Vec<Vec<Rings>> = polygons.iter().map(|p| vec![p.clone()]).collect();
-    Ok(b.coverage(&features)?
+    Ok(b.coverage(&features, None)?
         .into_iter()
-        .map(|spans| {
-            let mut acc: BTreeMap<[u64; 2], f64> = BTreeMap::new();
-            for s in spans {
-                for c in s.c0..s.c1 {
-                    *acc.entry([s.row as u64, c as u64]).or_insert(0.0) += s.w as f64;
-                }
-            }
-            acc.into_iter()
-                .filter(|&(_, f)| f > 1e-6)
-                .map(|(c, f)| (c, f.min(1.0)))
-                .collect()
-        })
+        .map(cell_covers)
         .collect())
+}
+
+/// Signed spans to `(cell, fraction)`, sorted, empty cells dropped.
+pub(crate) fn cell_covers(spans: Vec<Span>) -> Vec<CellCover> {
+    let mut acc: BTreeMap<[u64; 2], f64> = BTreeMap::new();
+    for s in spans {
+        for c in s.c0..s.c1 {
+            *acc.entry([s.row as u64, c as u64]).or_insert(0.0) += s.w as f64;
+        }
+    }
+    acc.into_iter()
+        .filter(|&(_, f)| f > 1e-6)
+        .map(|(c, f)| (c, f.min(1.0)))
+        .collect()
 }
 
 /// Summary of one zone over one leading slice. Counts and sums are
@@ -282,7 +326,7 @@ pub fn plan_zones(
     let n = shape.len();
     let (ch, cw) = (chunk[n - 2], chunk[n - 1]);
     let spans: Vec<Vec<Span>> = match cells {
-        ZoneCells::Coverage => b.coverage(features)?,
+        ZoneCells::Coverage => b.coverage(features, None)?,
         _ => features
             .iter()
             .map(|polys| {

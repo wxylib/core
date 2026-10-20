@@ -43,12 +43,17 @@ use wxy_domain::{CellConvention, CoordArray, Domain, Frame, Mapping, Positions};
 use wxy_source::{read_window, Buffer, ChunkSource, Error, Result, Values, Window};
 
 mod chunked;
+mod cover;
 mod explain;
 mod extract;
 mod geoloc;
 mod rasterize;
 mod zonal;
 
+pub use cover::{
+    cell_outlines, cover_cells, polygon_centres_world, polygon_coverage_by, polygon_to_index,
+    CoverMethod,
+};
 pub use explain::{CacheSummary, Detail, Explain, Fetch, Region, SourceSummary, WarpChunk};
 pub use extract::{
     extract_points, plan_pixels, plan_points, PointMethod, PointOptions, PointPlan, PointValues,
