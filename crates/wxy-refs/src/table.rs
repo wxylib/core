@@ -474,7 +474,8 @@ fn remap_rules(table: &Value, target: Option<&str>) -> Vec<(String, String)> {
     out
 }
 
-/// A source path as a URL: remapped, then made absolute against `dir`.
+/// A source path as a URL: remapped, a GDAL `/vsicurl/` or `/vsis3/` path
+/// taken as its URL, then made absolute against `dir`.
 fn resolve(path: &str, remap: &[(String, String)], dir: &Path) -> Result<String> {
     let mut p = path.to_string();
     if let Some((prefix, rep)) = remap
@@ -483,6 +484,7 @@ fn resolve(path: &str, remap: &[(String, String)], dir: &Path) -> Result<String>
     {
         p = format!("{rep}{}", &path[prefix.len()..]);
     }
+    let p = crate::location::vsi_to_url(&p);
     if p.contains("://") {
         return Ok(p);
     }
@@ -496,8 +498,9 @@ fn resolve(path: &str, remap: &[(String, String)], dir: &Path) -> Result<String>
     Ok(format!("file://{}", local.display()))
 }
 
-/// A source path as a URL for a table read from `base`: remapped, then a
-/// relative path joined to `base` and an absolute one taken as local.
+/// A source path as a URL for a table read from `base`: remapped, a GDAL
+/// `/vsicurl/` or `/vsis3/` path taken as its URL, then a relative path
+/// joined to `base` and an absolute one taken as local.
 fn resolve_url(path: &str, remap: &[(String, String)], base: &url::Url) -> Result<String> {
     let mut p = path.to_string();
     if let Some((prefix, rep)) = remap
@@ -506,6 +509,7 @@ fn resolve_url(path: &str, remap: &[(String, String)], base: &url::Url) -> Resul
     {
         p = format!("{rep}{}", &path[prefix.len()..]);
     }
+    let p = crate::location::vsi_to_url(&p);
     if p.contains("://") {
         return Ok(p);
     }
