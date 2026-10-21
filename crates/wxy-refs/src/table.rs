@@ -52,23 +52,22 @@ pub fn from_refs_table(dir: impl AsRef<Path>, target: Option<&str>) -> Result<Ve
     let dir = std::fs::canonicalize(dir.as_ref()).map_err(io)?;
     let table = parse_table(&std::fs::read(dir.join("arrays.json")).map_err(io)?)?;
     let remap = remap_rules(&table, target);
-    build(
-        &table,
-        |name| {
-            let file = dir.join(format!("refs_{name}.parquet"));
-            let bytes = std::fs::read(&file).map_err(io)?;
-            Ok((file.display().to_string(), Bytes::from(bytes)))
-        },
-        &|p| resolve(p, &remap, &dir),
-    )
+    let url = |p: &str| resolve(p, &remap, &dir);
+    build(&array_rows(&table)?, |row| {
+        let file = dir.join(format!("refs_{}.parquet", row.name));
+        let bytes = std::fs::read(&file).map_err(io)?;
+        read_refs(&file.display().to_string(), Bytes::from(bytes), row, &url)
+    })
 }
 
 /// Read an exported table at a URL (`s3://bucket/prefix`, `https://...`
-/// or `file://...`; a plain path reads as [`from_refs_table`]): the same
+/// or `file://...`, or GDAL's `/vsis3/...` or `/vsicurl/...`; a plain path
+/// reads as [`from_refs_table`]): the same
 /// files fetched through `object_store` (see [`crate::location`] for S3
 /// credentials and endpoints). A relative source path is taken relative
 /// to the table's URL.
 pub async fn from_refs_table_at(location: &str, target: Option<&str>) -> Result<Vec<VirtualArray>> {
+    let location = &crate::location::vsi_to_url(location);
     if !location.contains("://") {
         return from_refs_table(location, target);
     }
@@ -93,16 +92,14 @@ pub async fn from_refs_table_at(location: &str, target: Option<&str>) -> Result<
     }
     let remap = remap_rules(&table, target);
     let base = url::Url::parse(&dir).map_err(|e| Error::Fetch(format!("{dir}: {e}")))?;
-    build(
-        &table,
-        |name| {
-            files
-                .get(name)
-                .cloned()
-                .ok_or_else(|| Error::Decode(format!("refs_{name}.parquet not read")))
-        },
-        &|p| resolve_url(p, &remap, &base),
-    )
+    let url = |p: &str| resolve_url(p, &remap, &base);
+    build(&array_rows(&table)?, |row| {
+        let (label, bytes) = files
+            .get(&row.name)
+            .cloned()
+            .ok_or_else(|| Error::Decode(format!("refs_{}.parquet not read", row.name)))?;
+        read_refs(&label, bytes, row, &url)
+    })
 }
 
 /// `arrays.json`, checked for its format version.
@@ -136,15 +133,12 @@ fn referenced_names(table: &Value) -> Result<Vec<String>> {
         .collect())
 }
 
-/// The virtual arrays of `table`, the Parquet file of each referenced
-/// array (named for messages, and its bytes) given by `refs`, source
-/// paths turned into URLs by `url`.
-fn build(
-    table: &Value,
-    refs: impl Fn(&str) -> Result<(String, Bytes)>,
-    url: &dyn Fn(&str) -> Result<String>,
+/// The virtual arrays of the `arrays` table `rows`, the chunks of each
+/// referenced array given by `refs`.
+pub(crate) fn build(
+    rows: &[ArrayRow],
+    refs: impl Fn(&ArrayRow) -> Result<(Vec<ChunkRef>, Inline)>,
 ) -> Result<Vec<VirtualArray>> {
-    let rows = array_rows(table)?;
     let coords: HashMap<&str, &ArrayRow> = rows
         .iter()
         .filter(|r| r.storage != "referenced" && r.dims.len() == 1)
@@ -152,10 +146,9 @@ fn build(
         .collect();
 
     let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
+    for row in rows {
         out.push(if row.storage == "referenced" {
-            let (label, bytes) = refs(&row.name)?;
-            let (refs, inline) = read_refs(&label, bytes, row, url)?;
+            let (refs, inline) = refs(row)?;
             referenced(row, &coords, refs, inline)?
         } else {
             coordinate(row)?
@@ -165,22 +158,22 @@ fn build(
 }
 
 /// One row of the `arrays` table.
-struct ArrayRow {
-    name: String,
-    storage: String,
-    dims: Vec<String>,
-    shape: Vec<u64>,
-    chunks: Vec<u64>,
-    dtype: Numpy,
-    fill: Option<f64>,
-    codec: Value,
-    attrs: Map<String, Value>,
-    affine: Option<(f64, f64)>,
-    values: Option<Vec<f64>>,
+pub(crate) struct ArrayRow {
+    pub(crate) name: String,
+    pub(crate) storage: String,
+    pub(crate) dims: Vec<String>,
+    pub(crate) shape: Vec<u64>,
+    pub(crate) chunks: Vec<u64>,
+    pub(crate) dtype: Numpy,
+    pub(crate) fill: Option<f64>,
+    pub(crate) codec: Value,
+    pub(crate) attrs: Map<String, Value>,
+    pub(crate) affine: Option<(f64, f64)>,
+    pub(crate) values: Option<Vec<f64>>,
 }
 
 impl ArrayRow {
-    fn parse(v: &Value) -> Result<Self> {
+    pub(crate) fn parse(v: &Value) -> Result<Self> {
         let name = v["array"]
             .as_str()
             .ok_or_else(|| bad("array", v))?
@@ -275,8 +268,8 @@ fn io(e: std::io::Error) -> Error {
 
 /// A numpy dtype string such as `<i2`.
 #[derive(Debug, Clone, Copy)]
-struct Numpy {
-    dtype: DataType,
+pub(crate) struct Numpy {
+    pub(crate) dtype: DataType,
     big_endian: bool,
 }
 
@@ -368,7 +361,7 @@ fn is_lon(c: &ArrayRow) -> bool {
     wxy_zarr::cf_axis(&c.name, &c.attrs) == Some(wxy_zarr::Axis::Lon)
 }
 
-fn referenced(
+pub(crate) fn referenced(
     row: &ArrayRow,
     coords: &HashMap<&str, &ArrayRow>,
     refs: Vec<ChunkRef>,
@@ -501,7 +494,11 @@ fn resolve(path: &str, remap: &[(String, String)], dir: &Path) -> Result<String>
 /// A source path as a URL for a table read from `base`: remapped, a GDAL
 /// `/vsicurl/` or `/vsis3/` path taken as its URL, then a relative path
 /// joined to `base` and an absolute one taken as local.
-fn resolve_url(path: &str, remap: &[(String, String)], base: &url::Url) -> Result<String> {
+pub(crate) fn resolve_url(
+    path: &str,
+    remap: &[(String, String)],
+    base: &url::Url,
+) -> Result<String> {
     let mut p = path.to_string();
     if let Some((prefix, rep)) = remap
         .iter()
@@ -522,7 +519,7 @@ fn resolve_url(path: &str, remap: &[(String, String)], base: &url::Url) -> Resul
 }
 
 /// Encoded chunk bytes held in the table itself, by chunk key.
-type Inline = Vec<(Vec<u64>, Vec<u8>)>;
+pub(crate) type Inline = Vec<(Vec<u64>, Vec<u8>)>;
 
 /// The present rows of one `refs_<array>` export: referenced rows as chunk
 /// references, inline rows (`offset` null, `data` set) as encoded bytes.

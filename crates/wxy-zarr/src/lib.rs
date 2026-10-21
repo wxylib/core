@@ -423,6 +423,18 @@ async fn sibling(
     }))
 }
 
+/// Every value of the array at `path`, decoded and widened to f64 (for
+/// small arrays such as coordinates).
+pub async fn read_values(storage: Arc<Storage>, path: &str) -> Result<Vec<f64>> {
+    let array = Array::async_open(storage, path)
+        .await
+        .map_err(|e| Error::Decode(format!("{path}: {e}")))?;
+    let shape = array.shape().to_vec();
+    let source = ZarrSource::new(array)?;
+    let buf = read_window(&source, &Window::new(vec![0; shape.len()], shape)).await?;
+    Ok(buf.values.to_f64())
+}
+
 /// A CF-style coordinate: sibling array `name`, 1D, of length `len`.
 async fn coordinate(
     storage: &Arc<Storage>,
