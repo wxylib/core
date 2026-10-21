@@ -89,3 +89,37 @@ pub fn s3_from_env(bucket: &str) -> object_store::aws::AmazonS3Builder {
     }
     b
 }
+
+/// A GDAL virtual file system path as the URL it reads: `/vsicurl/<url>`
+/// as `<url>`, `/vsis3/<bucket>/<key>` as `s3://<bucket>/<key>` (and their
+/// `_streaming` forms). Anything else is returned unchanged, so tables
+/// written for GDAL read here without a remap.
+pub fn vsi_to_url(path: &str) -> String {
+    for prefix in ["/vsicurl/", "/vsicurl_streaming/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+    for prefix in ["/vsis3/", "/vsis3_streaming/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            return format!("s3://{rest}");
+        }
+    }
+    path.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gdal_vsi_paths_become_urls() {
+        assert_eq!(
+            vsi_to_url("/vsicurl/https://h.org/a/b.nc"),
+            "https://h.org/a/b.nc"
+        );
+        assert_eq!(vsi_to_url("/vsis3/bucket/k/x.nc"), "s3://bucket/k/x.nc");
+        assert_eq!(vsi_to_url("/data/x.nc"), "/data/x.nc");
+        assert_eq!(vsi_to_url("https://h.org/x.nc"), "https://h.org/x.nc");
+    }
+}
