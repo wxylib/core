@@ -24,13 +24,15 @@ pub use kerchunk::from_kerchunk_at;
 pub use store::{chunk_key, RefsStats, RefsStore};
 pub use table::{from_refs_table, from_refs_table_at};
 
-/// Read the references at `location` (a URL or local directory): an
+/// Read the references at `location` (a URL, GDAL `/vsis3/` or
+/// `/vsicurl/` path, or local directory): an
 /// mdim-refs export when it holds `arrays.json`, else a kerchunk Parquet
 /// store (`.zmetadata`). `target` picks the table's remap rows.
 pub async fn open_refs_at(
     location: &str,
     target: Option<&str>,
 ) -> wxy_source::Result<Vec<VirtualArray>> {
+    let location = &location::vsi_to_url(location);
     let local = !location.contains("://");
     let table = if local {
         std::path::Path::new(location).join("arrays.json").is_file()

@@ -31,11 +31,12 @@ use wxy_source::{Error, Result};
 use crate::table::{build, referenced, resolve_url, ArrayRow, Inline};
 use crate::{ChunkRef, RefsStore, VirtualArray};
 
-/// Read the kerchunk Parquet store at `location` (a URL, or a local
-/// directory) as virtual arrays, one per array at `/<name>`. Source paths
+/// Read the kerchunk Parquet store at `location` (a URL, a GDAL
+/// `/vsis3/` or `/vsicurl/` path, or a local directory) as virtual arrays, one per array at `/<name>`. Source paths
 /// are taken as [`crate::from_refs_table_at`] takes them: GDAL `/vsicurl/`
 /// and `/vsis3/` paths as their URLs, relative paths against the store.
 pub async fn from_kerchunk_at(location: &str) -> Result<Vec<VirtualArray>> {
+    let location = &crate::location::vsi_to_url(location);
     let dir = if location.contains("://") {
         format!("{}/", location.trim_end_matches('/'))
     } else {
