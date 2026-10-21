@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wxy-domain", "crates/wxy-source", "crates/wxy-tiff", "crates/wxy-geozarr", "crates/wxy-zarr", "crates/wxy-virtual", "crates/wxy-resample", "crates/wxy-warp", "crates/wxy-cli", "crates/wxy-cache", "crates/wxy-refs"]
+members = ["crates/wxy-domain", "crates/wxy-source", "crates/wxy-tiff", "crates/wxy-geozarr", "crates/wxy-zarr", "crates/wxy-virtual", "crates/wxy-resample", "crates/wxy-warp", "crates/wxy-cli", "crates/wxy-cache", "crates/wxy-refs", "crates/wxy-predictor"]
 
 [workspace.package]
 version = "0.0.1"
