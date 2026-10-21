@@ -564,7 +564,10 @@ fn read_refs(
         let present = int_column(&batch, "present")?;
         let offset = int_column(&batch, "offset")?;
         let size = int_column(&batch, "size")?;
-        let path = column(&batch, "path")?;
+        // Large or dictionary-encoded strings too (a long series' paths
+        // pass arrow's 2 GiB limit for a plain string column)
+        let path = arrow_cast::cast(&column(&batch, "path")?, &ArrowType::Utf8)
+            .map_err(|e| Error::Decode(format!("refs: `path`: {e}")))?;
         let path = path
             .as_any()
             .downcast_ref::<StringArray>()
@@ -644,7 +647,7 @@ fn int_column(batch: &RecordBatch, name: &str) -> Result<Int64Array> {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{ArrayRef, BinaryArray, Int64Array, Int8Array, StringArray};
+    use arrow_array::{ArrayRef, BinaryArray, Int64Array, Int8Array};
     use parquet::arrow::ArrowWriter;
 
     use super::*;
@@ -676,9 +679,14 @@ mod tests {
             ("dim_0", Arc::new(Int64Array::from(vec![0, 0, 0]))),
             ("dim_1", Arc::new(Int64Array::from(vec![0, 1, 2]))),
             ("present", Arc::new(Int8Array::from(vec![1, 1, 0]))),
+            // dictionary-encoded, as raad.virtualize writes it
             (
                 "path",
-                Arc::new(StringArray::from(vec![Some("/src/a.bin"), None, None])),
+                Arc::new(
+                    vec![Some("/src/a.bin"), None, None]
+                        .into_iter()
+                        .collect::<arrow_array::DictionaryArray<arrow_array::types::Int32Type>>(),
+                ),
             ),
             (
                 "offset",
