@@ -16,9 +16,19 @@
 //! (doc 03, S3c) instead of an Icechunk repository, so the two read paths
 //! can be checked against the same GDAL hashes.
 //!
+//! The table can also be named by URL, such as the `flat/` export of a
+//! store on S3 (credentials and endpoint from the `AWS_*` environment,
+//! GDAL's names included; see `wxy_refs::location`). With no
+//! `manifest.json` there (or `--manifest <file>`), two windows are read,
+//! the first day's chunk at row 1200 and a row of the last day, and their
+//! SHA-256 printed for comparison with GDAL.
+//!
 //! ```sh
 //! cargo run --release -p wxy-virtual --example bran_refs -- ../fixtures/mdimrefs/bran2023-temp-201001
 //! cargo run --release -p wxy-virtual --example bran_refs -- ../fixtures/mdimrefs/bran2023-temp-201001 --direct
+//! AWS_S3_ENDPOINT=transfer.data.aad.gov.au AWS_VIRTUAL_HOSTING=NO \
+//!   cargo run --release -p wxy-virtual --example bran_refs -- \
+//!   s3://aadc-transfer/michae_sum/e2e/bran2023-daily-temp/flat --direct
 //! ```
 
 use std::path::PathBuf;
@@ -30,16 +40,28 @@ use wxy_source::{read_window, ChunkSource, Window};
 
 #[tokio::main]
 async fn main() {
-    let direct = std::env::args().any(|a| a == "--direct");
-    let dir = std::env::args()
-        .skip(1)
-        .find(|a| !a.starts_with("--"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("../fixtures/mdimrefs/bran2023-temp-201001"));
-    let manifest: Value =
-        serde_json::from_reader(std::fs::File::open(dir.join("manifest.json")).unwrap()).unwrap();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let direct = args.iter().any(|a| a == "--direct");
+    let manifest_arg = args
+        .iter()
+        .position(|a| a == "--manifest")
+        .map(|i| PathBuf::from(&args[i + 1]));
+    let dir = args
+        .iter()
+        .enumerate()
+        .find(|(i, a)| !a.starts_with("--") && (*i == 0 || args[i - 1] != "--manifest"))
+        .map(|(_, a)| a.clone())
+        .unwrap_or_else(|| "../fixtures/mdimrefs/bran2023-temp-201001".into());
+    let manifest_file = manifest_arg.or_else(|| {
+        Some(PathBuf::from(&dir).join("manifest.json"))
+            .filter(|p| !dir.contains("://") && p.is_file())
+    });
+    let manifest: Option<Value> =
+        manifest_file.map(|f| serde_json::from_reader(std::fs::File::open(f).unwrap()).unwrap());
 
-    let arrays = wxy_virtual::from_refs_table(&dir, None).unwrap();
+    let t0 = Instant::now();
+    let arrays = wxy_refs::from_refs_table_at(&dir, None).await.unwrap();
+    println!("table read in {:.2} s", t0.elapsed().as_secs_f64());
     let prefixes = wxy_virtual::prefixes(&arrays);
     let refs: usize = arrays.iter().map(|a| a.refs.len()).sum();
     println!(
@@ -82,8 +104,15 @@ async fn main() {
         e.fetch.decoded_bytes as f64 / 1e6
     );
 
+    let windows = match &manifest {
+        Some(m) => m["oracle"].clone(),
+        None => serde_json::json!({
+            "chunk-t0-z0-y4-x0": {"start": [0, 0, 1200, 0], "count": [1, 1, 300, 300]},
+            "row-tlast-z10-y750": {"start": [grid.shape[0] - 1, 10, 750, 0], "count": [1, 1, 1, 3600]},
+        }),
+    };
     let mut ok = true;
-    for (name, o) in manifest["oracle"].as_object().unwrap() {
+    for (name, o) in windows.as_object().unwrap() {
         let v = |k: &str| -> Vec<u64> {
             o[k].as_array()
                 .unwrap()
@@ -101,11 +130,11 @@ async fn main() {
             }
         };
         let secs = t0.elapsed().as_secs_f64();
+        let got: String = Sha256::digest(buf.values.to_le_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         if let Some(want) = o["sha256"].as_str() {
-            let got: String = Sha256::digest(buf.values.to_le_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
             ok &= got == want;
             let verdict = if got == want {
                 "identical to"
@@ -119,7 +148,7 @@ async fn main() {
             let lo = valid.iter().copied().fold(f64::INFINITY, f64::min);
             let hi = valid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             println!(
-                "{name}: {} valid, raw {lo} to {hi} ({secs:.2} s; no GDAL SHA-256 in the manifest)",
+                "{name}: {} valid, raw {lo} to {hi}, sha256 {got} ({secs:.2} s; no GDAL SHA-256 to compare)",
                 valid.len()
             );
         }

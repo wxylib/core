@@ -15,11 +15,12 @@
 //! keeps what it fetched, keyed on the source as the table names it
 //! before any remap.
 
+pub mod location;
 pub mod store;
 pub mod table;
 
 pub use store::{chunk_key, RefsStats, RefsStore};
-pub use table::from_refs_table;
+pub use table::{from_refs_table, from_refs_table_at};
 
 /// A reference to one stored chunk: its key in the Zarr chunk grid, the
 /// source it was scanned from (as the table names it, before any remap),

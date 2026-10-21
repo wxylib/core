@@ -220,10 +220,11 @@ async fn open(path: &Path, array: &str) -> Result<Opened, Failure> {
 }
 
 /// A byte-reference table (a directory holding the mdim-refs export,
-/// `arrays.json` beside `refs_<array>.parquet`): read straight from the
-/// table, chunks fetched from their sources (through `cache` when given).
+/// `arrays.json` beside `refs_<array>.parquet`, or an `s3://` prefix
+/// holding one): read straight from the table, chunks fetched from their
+/// sources (through `cache` when given).
 fn is_refs_table(path: &Path) -> bool {
-    path.join("arrays.json").is_file()
+    path.to_str().is_some_and(|s| s.starts_with("s3://")) || path.join("arrays.json").is_file()
 }
 
 /// Open a source, its bytes read through `cache` when given (GeoTIFF
@@ -236,7 +237,7 @@ async fn open_cached(
     remap: Option<&str>,
 ) -> Result<Opened, Failure> {
     if is_refs_table(path) {
-        let arrays = wxy_refs::from_refs_table(path, remap)?;
+        let arrays = wxy_refs::from_refs_table_at(&path.to_string_lossy(), remap).await?;
         let store = std::sync::Arc::new(wxy_refs::RefsStore::new(&arrays, cache.cloned())?);
         let name = array.trim_start_matches('/');
         let ds = wxy_zarr::open(store.clone(), name).await?;
