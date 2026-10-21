@@ -61,11 +61,13 @@ pub fn from_refs_table(dir: impl AsRef<Path>, target: Option<&str>) -> Result<Ve
 }
 
 /// Read an exported table at a URL (`s3://bucket/prefix`, `https://...`
-/// or `file://...`; a plain path reads as [`from_refs_table`]): the same
+/// or `file://...`, or GDAL's `/vsis3/...` or `/vsicurl/...`; a plain path
+/// reads as [`from_refs_table`]): the same
 /// files fetched through `object_store` (see [`crate::location`] for S3
 /// credentials and endpoints). A relative source path is taken relative
 /// to the table's URL.
 pub async fn from_refs_table_at(location: &str, target: Option<&str>) -> Result<Vec<VirtualArray>> {
+    let location = &crate::location::vsi_to_url(location);
     if !location.contains("://") {
         return from_refs_table(location, target);
     }

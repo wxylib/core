@@ -17,12 +17,16 @@
 //! can be checked against the same GDAL hashes.
 //!
 //! The table can also be named by URL, such as the `flat/` export of a
-//! store on S3, or be a kerchunk Parquet store (`.zmetadata`, such as the
-//! same store's `kerchunk/`) (credentials and endpoint from the `AWS_*` environment,
-//! GDAL's names included; see `wxy_refs::location`). With no
+//! store on S3 (credentials and endpoint from the `AWS_*` environment,
+//! GDAL's names included; see `wxy_refs::location`), or by its GDAL path
+//! (`/vsis3/...`), and it can be a kerchunk Parquet store (`.zmetadata`,
+//! such as the same store's `kerchunk/`). With no
 //! `manifest.json` there (or `--manifest <file>`), two windows are read,
 //! the first day's chunk at row 1200 and a row of the last day, and their
-//! SHA-256 printed for comparison with GDAL.
+//! SHA-256 printed for comparison with GDAL. For the store below (365
+//! days, 1,116,900 references in 12 netCDF files), both match
+//! wxylib/fixtures `scripts/oracle_bran2023_store.py` (GDAL 3.13.3,
+//! 2026-10-21), through `--direct` and through Icechunk.
 //!
 //! ```sh
 //! cargo run --release -p wxy-virtual --example bran_refs -- ../fixtures/mdimrefs/bran2023-temp-201001
