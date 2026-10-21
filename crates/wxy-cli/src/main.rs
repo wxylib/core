@@ -253,6 +253,22 @@ async fn open_cached(
             refs: Some((store, name.to_string())),
         });
     }
+    // a Zarr hierarchy by URL (such as a Copernicus Marine ARCO store),
+    // read by GETs of its keys
+    if let Some(url) = path.to_str().filter(|s| wxy_zarr::is_zarr_url(s)) {
+        if cache.is_some() {
+            return Err("--cache reads GeoTIFF sources only, for now".into());
+        }
+        let ds = wxy_zarr::open_url(url, array).await?;
+        let mut c = ds.collection;
+        return Ok(Opened {
+            levels: vec![Box::new(ds.source)],
+            nodata: c.fields[0].values.nodata,
+            domains: vec![c.domains.swap_remove(0)],
+            cache_key: None,
+            refs: None,
+        });
+    }
     let url = path.to_str().filter(|s| wxy_tiff::is_url(s));
     if let Some(url) = url {
         // read by range requests; the cache validates rows by the etag

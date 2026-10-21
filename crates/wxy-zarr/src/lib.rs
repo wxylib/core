@@ -70,6 +70,33 @@ pub async fn open_path(root: impl AsRef<std::path::Path>, array: &str) -> Result
     open_store(Arc::new(fs), array).await
 }
 
+/// Open array `array` in a Zarr hierarchy served over HTTP(S), `url` being
+/// its root (such as a Copernicus Marine ARCO `timeChunked.zarr`). Only GETs
+/// of metadata and chunk keys are made, so a bucket that refuses listing
+/// is fine.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn open_url(url: &str, array: &str) -> Result<ZarrDataset> {
+    let store = object_store::http::HttpBuilder::new()
+        .with_url(url.trim_end_matches('/'))
+        .with_client_options(
+            object_store::ClientOptions::new().with_allow_http(url.starts_with("http://")),
+        )
+        .build()
+        .map_err(|e| Error::Fetch(format!("{url}: {e}")))?;
+    open_store(Arc::new(store), array).await
+}
+
+/// Whether `source` names a Zarr hierarchy by URL: http(s), with a path
+/// segment ending `.zarr`.
+pub fn is_zarr_url(source: &str) -> bool {
+    (source.starts_with("https://") || source.starts_with("http://"))
+        && source
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .is_some_and(|s| s.ends_with(".zarr"))
+}
+
 /// Open array `array` in any object store, rooted at the Zarr hierarchy.
 pub async fn open_store(
     store: Arc<dyn object_store::ObjectStore>,
@@ -316,13 +343,23 @@ fn fill_value_text(a: &Array<Storage>) -> String {
 }
 
 /// Dim names from `dimension_names`, or `dim_<k>` where unnamed.
+/// Dimension names: Zarr v3 `dimension_names`, else the `_ARRAY_DIMENSIONS`
+/// attribute xarray writes on Zarr v2 arrays (as in the Copernicus Marine
+/// ARCO stores), else `dim_k`.
 fn dim_names(a: &Array<Storage>) -> Vec<String> {
     let names = a.dimension_names().clone().unwrap_or_default();
+    let v2: Vec<Option<String>> = a
+        .attributes()
+        .get("_ARRAY_DIMENSIONS")
+        .and_then(Value::as_array)
+        .map(|v| v.iter().map(|n| n.as_str().map(String::from)).collect())
+        .unwrap_or_default();
     (0..a.dimensionality())
         .map(|k| {
             names
                 .get(k)
                 .and_then(|n| n.as_ref().map(|s| s.to_string()))
+                .or_else(|| v2.get(k).cloned().flatten())
                 .unwrap_or_else(|| format!("dim_{k}"))
         })
         .collect()
@@ -650,5 +687,20 @@ mod fill_value_tests {
         assert_eq!(v, 1.0);
         assert_eq!(fill_value_attr(&Value::from(-32768)), Some(-32768.0));
         assert_eq!(fill_value_attr(&Value::String("x".into())), None);
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::is_zarr_url;
+
+    #[test]
+    fn zarr_urls() {
+        assert!(is_zarr_url(
+            "https://s3.waw3-1.cloudferro.com/mdl-arco-time-025/arco/P/D/timeChunked.zarr"
+        ));
+        assert!(is_zarr_url("http://127.0.0.1:8765/arco.zarr/"));
+        assert!(!is_zarr_url("https://example.org/x.tif"));
+        assert!(!is_zarr_url("/data/x.zarr"));
     }
 }

@@ -5203,6 +5203,7 @@ dependencies = [
  "async-trait",
  "object_store",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
  "wxy-domain",
  "wxy-geozarr",
