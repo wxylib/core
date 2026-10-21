@@ -45,7 +45,7 @@ pub struct RefsStats {
 /// the default encoding the table's metadata names). A referenced chunk is
 /// fetched as one byte range from its URL (`file://`, `http(s)://`, or
 /// `s3://bucket/key` with credentials, endpoint and addressing style from
-/// the `AWS_*` environment, as `object_store`'s S3 builder reads them);
+/// the `AWS_*` environment, see [`crate::location`]);
 /// a key the table does not hold is missing, so zarrs reads the fill value.
 ///
 /// With a cache, each range is looked up first under the source's
@@ -165,45 +165,12 @@ impl RefsStore {
 
     /// The object store and location for a URL.
     fn locate(&self, url: &str) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
-        let bad = |e: &dyn std::fmt::Display| Error::Fetch(format!("{url}: {e}"));
-        let u = url::Url::parse(url).map_err(|e| bad(&e))?;
-        let (base, location) = match u.scheme() {
-            "file" => {
-                let p = u.to_file_path().map_err(|_| bad(&"not a local path"))?;
-                (
-                    "file://".to_string(),
-                    ObjectPath::from_filesystem_path(&p).map_err(|e| bad(&e))?,
-                )
-            }
-            "http" | "https" | "s3" => (
-                u[..url::Position::BeforePath].to_string(),
-                ObjectPath::from_url_path(u.path()).map_err(|e| bad(&e))?,
-            ),
-            s => {
-                return Err(Error::Unsupported(format!(
-                    "chunk location scheme {s}: {url}"
-                )))
-            }
-        };
+        let (base, location) = crate::location::split(url)?;
         let mut stores = self.stores.lock().unwrap();
         if let Some(s) = stores.get(&base) {
             return Ok((s.clone(), location));
         }
-        let store: Arc<dyn ObjectStore> = match u.scheme() {
-            "file" => Arc::new(object_store::local::LocalFileSystem::new()),
-            "s3" => Arc::new(
-                object_store::aws::AmazonS3Builder::from_env()
-                    .with_bucket_name(u.host_str().ok_or_else(|| bad(&"no bucket"))?)
-                    .build()
-                    .map_err(|e| bad(&e))?,
-            ),
-            _ => Arc::new(
-                object_store::http::HttpBuilder::new()
-                    .with_url(&base)
-                    .build()
-                    .map_err(|e| bad(&e))?,
-            ),
-        };
+        let store = crate::location::store(&base)?;
         stores.insert(base, store.clone());
         Ok((store, location))
     }

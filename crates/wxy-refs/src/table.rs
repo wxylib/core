@@ -27,11 +27,11 @@
 //! Spec: wxylib/design `specs/mdim-refs-0.2.md`.
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use arrow_array::{Array, BinaryArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::DataType as ArrowType;
+use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::{json, Map, Value};
 use wxy_domain::DataType;
@@ -50,21 +50,101 @@ pub const FORMAT_PREFIX: &str = "mdim-refs/";
 /// relative to `dir`, and a local path becomes a `file://` URL.
 pub fn from_refs_table(dir: impl AsRef<Path>, target: Option<&str>) -> Result<Vec<VirtualArray>> {
     let dir = std::fs::canonicalize(dir.as_ref()).map_err(io)?;
-    let table: Value = serde_json::from_reader(File::open(dir.join("arrays.json")).map_err(io)?)
-        .map_err(|e| Error::Decode(format!("arrays.json: {e}")))?;
+    let table = parse_table(&std::fs::read(dir.join("arrays.json")).map_err(io)?)?;
+    let remap = remap_rules(&table, target);
+    build(
+        &table,
+        |name| {
+            let file = dir.join(format!("refs_{name}.parquet"));
+            let bytes = std::fs::read(&file).map_err(io)?;
+            Ok((file.display().to_string(), Bytes::from(bytes)))
+        },
+        &|p| resolve(p, &remap, &dir),
+    )
+}
+
+/// Read an exported table at a URL (`s3://bucket/prefix`, `https://...`
+/// or `file://...`; a plain path reads as [`from_refs_table`]): the same
+/// files fetched through `object_store` (see [`crate::location`] for S3
+/// credentials and endpoints). A relative source path is taken relative
+/// to the table's URL.
+pub async fn from_refs_table_at(location: &str, target: Option<&str>) -> Result<Vec<VirtualArray>> {
+    if !location.contains("://") {
+        return from_refs_table(location, target);
+    }
+    let dir = format!("{}/", location.trim_end_matches('/'));
+    let get = |url: String| async move {
+        let (base, path) = crate::location::split(&url)?;
+        let store = crate::location::store(&base)?;
+        let bytes = object_store::ObjectStoreExt::get(&store, &path)
+            .await
+            .map_err(|e| Error::Fetch(format!("{url}: {e}")))?
+            .bytes()
+            .await
+            .map_err(|e| Error::Fetch(format!("{url}: {e}")))?;
+        Ok::<(String, Bytes), Error>((url, bytes))
+    };
+    let (_, json) = get(format!("{dir}arrays.json")).await?;
+    let table = parse_table(&json)?;
+    let mut files = HashMap::new();
+    for name in referenced_names(&table)? {
+        let got = get(format!("{dir}refs_{name}.parquet")).await?;
+        files.insert(name, got);
+    }
+    let remap = remap_rules(&table, target);
+    let base = url::Url::parse(&dir).map_err(|e| Error::Fetch(format!("{dir}: {e}")))?;
+    build(
+        &table,
+        |name| {
+            files
+                .get(name)
+                .cloned()
+                .ok_or_else(|| Error::Decode(format!("refs_{name}.parquet not read")))
+        },
+        &|p| resolve_url(p, &remap, &base),
+    )
+}
+
+/// `arrays.json`, checked for its format version.
+fn parse_table(bytes: &[u8]) -> Result<Value> {
+    let table: Value =
+        serde_json::from_slice(bytes).map_err(|e| Error::Decode(format!("arrays.json: {e}")))?;
     let format = table["format_version"].as_str().unwrap_or("");
     if !format.starts_with(FORMAT_PREFIX) {
         return Err(Error::Unsupported(format!(
             "not an mdim-refs table: {format:?}"
         )));
     }
-    let remap = remap_rules(&table, target);
-    let rows: Vec<ArrayRow> = table["arrays"]
+    Ok(table)
+}
+
+fn array_rows(table: &Value) -> Result<Vec<ArrayRow>> {
+    table["arrays"]
         .as_array()
         .ok_or_else(|| Error::Decode("arrays.json: no arrays".into()))?
         .iter()
         .map(ArrayRow::parse)
-        .collect::<Result<_>>()?;
+        .collect()
+}
+
+/// The arrays whose chunks the table references (one Parquet file each).
+fn referenced_names(table: &Value) -> Result<Vec<String>> {
+    Ok(array_rows(table)?
+        .into_iter()
+        .filter(|r| r.storage == "referenced")
+        .map(|r| r.name)
+        .collect())
+}
+
+/// The virtual arrays of `table`, the Parquet file of each referenced
+/// array (named for messages, and its bytes) given by `refs`, source
+/// paths turned into URLs by `url`.
+fn build(
+    table: &Value,
+    refs: impl Fn(&str) -> Result<(String, Bytes)>,
+    url: &dyn Fn(&str) -> Result<String>,
+) -> Result<Vec<VirtualArray>> {
+    let rows = array_rows(table)?;
     let coords: HashMap<&str, &ArrayRow> = rows
         .iter()
         .filter(|r| r.storage != "referenced" && r.dims.len() == 1)
@@ -74,10 +154,8 @@ pub fn from_refs_table(dir: impl AsRef<Path>, target: Option<&str>) -> Result<Ve
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(if row.storage == "referenced" {
-            let (refs, inline) =
-                read_refs(&dir.join(format!("refs_{}.parquet", row.name)), row, &|p| {
-                    resolve(p, &remap, &dir)
-                })?;
+            let (label, bytes) = refs(&row.name)?;
+            let (refs, inline) = read_refs(&label, bytes, row, url)?;
             referenced(row, &coords, refs, inline)?
         } else {
             coordinate(row)?
@@ -418,18 +496,40 @@ fn resolve(path: &str, remap: &[(String, String)], dir: &Path) -> Result<String>
     Ok(format!("file://{}", local.display()))
 }
 
+/// A source path as a URL for a table read from `base`: remapped, then a
+/// relative path joined to `base` and an absolute one taken as local.
+fn resolve_url(path: &str, remap: &[(String, String)], base: &url::Url) -> Result<String> {
+    let mut p = path.to_string();
+    if let Some((prefix, rep)) = remap
+        .iter()
+        .find(|(prefix, _)| path.starts_with(prefix.as_str()))
+    {
+        p = format!("{rep}{}", &path[prefix.len()..]);
+    }
+    if p.contains("://") {
+        return Ok(p);
+    }
+    if Path::new(&p).is_absolute() {
+        return Ok(format!("file://{p}"));
+    }
+    base.join(&p)
+        .map(String::from)
+        .map_err(|e| Error::Fetch(format!("{p}: {e}")))
+}
+
 /// Encoded chunk bytes held in the table itself, by chunk key.
 type Inline = Vec<(Vec<u64>, Vec<u8>)>;
 
 /// The present rows of one `refs_<array>` export: referenced rows as chunk
 /// references, inline rows (`offset` null, `data` set) as encoded bytes.
 fn read_refs(
-    file: &Path,
+    file: &str,
+    bytes: Bytes,
     row: &ArrayRow,
     url: &dyn Fn(&str) -> Result<String>,
 ) -> Result<(Vec<ChunkRef>, Inline)> {
-    let pq = |e: parquet::errors::ParquetError| Error::Decode(format!("{}: {e}", file.display()));
-    let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(file).map_err(io)?)
+    let pq = |e: parquet::errors::ParquetError| Error::Decode(format!("{file}: {e}"));
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
         .map_err(pq)?
         .build()
         .map_err(pq)?;
@@ -581,7 +681,7 @@ mod tests {
             ),
         ];
         let batch = RecordBatch::try_from_iter(cols).unwrap();
-        let f = File::create(dir.join("refs_v.parquet")).unwrap();
+        let f = std::fs::File::create(dir.join("refs_v.parquet")).unwrap();
         let mut w = ArrowWriter::try_new(f, batch.schema(), None).unwrap();
         w.write(&batch).unwrap();
         w.close().unwrap();
@@ -603,6 +703,16 @@ mod tests {
         assert_eq!(a.inline, vec![(vec![0, 1], b"xyz".to_vec())]);
         assert_eq!(a.metadata["fill_value"], json!(-1));
         assert_eq!(a.metadata["codecs"][1]["name"], json!("numcodecs.zlib"));
+
+        // the same table read by URL, through object_store: relative
+        // sources join the table's URL
+        let url = format!("file://{}", std::fs::canonicalize(&dir).unwrap().display());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let by_url = rt.block_on(from_refs_table_at(&url, Some("t"))).unwrap();
+        assert_eq!(by_url[0].refs, a.refs);
+        assert_eq!(by_url[0].inline, a.inline);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
