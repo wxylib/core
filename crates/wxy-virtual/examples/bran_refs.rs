@@ -17,7 +17,8 @@
 //! can be checked against the same GDAL hashes.
 //!
 //! The table can also be named by URL, such as the `flat/` export of a
-//! store on S3 (credentials and endpoint from the `AWS_*` environment,
+//! store on S3, or be a kerchunk Parquet store (`.zmetadata`, such as the
+//! same store's `kerchunk/`) (credentials and endpoint from the `AWS_*` environment,
 //! GDAL's names included; see `wxy_refs::location`). With no
 //! `manifest.json` there (or `--manifest <file>`), two windows are read,
 //! the first day's chunk at row 1200 and a row of the last day, and their
@@ -29,6 +30,8 @@
 //! AWS_S3_ENDPOINT=transfer.data.aad.gov.au AWS_VIRTUAL_HOSTING=NO \
 //!   cargo run --release -p wxy-virtual --example bran_refs -- \
 //!   s3://aadc-transfer/michae_sum/e2e/bran2023-daily-temp/flat --direct
+//! cargo run --release -p wxy-virtual --example bran_refs -- \
+//!   s3://aadc-transfer/michae_sum/e2e/bran2023-daily-temp/kerchunk --direct
 //! ```
 
 use std::path::PathBuf;
@@ -60,7 +63,7 @@ async fn main() {
         manifest_file.map(|f| serde_json::from_reader(std::fs::File::open(f).unwrap()).unwrap());
 
     let t0 = Instant::now();
-    let arrays = wxy_refs::from_refs_table_at(&dir, None).await.unwrap();
+    let arrays = wxy_refs::open_refs_at(&dir, None).await.unwrap();
     println!("table read in {:.2} s", t0.elapsed().as_secs_f64());
     let prefixes = wxy_virtual::prefixes(&arrays);
     let refs: usize = arrays.iter().map(|a| a.refs.len()).sum();
