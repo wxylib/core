@@ -14,7 +14,9 @@
 //!
 //! - v2 codecs become Zarr v3: `bytes` with the dtype's byte order, then
 //!   `shuffle` as `numcodecs.shuffle`, then `zlib` as `numcodecs.zlib`
-//!   (`gzip` and `zstd` map too); anything else is unsupported.
+//!   (`gzip` and `zstd` map too); imagecodecs' `imagecodecs_delta` along
+//!   the last axis (TIFF Predictor=2) goes ahead of `bytes` as
+//!   `HorizontalDeltaCodec` (wxy-predictor); anything else is unsupported.
 //! - Affine coordinates on an array's last two dims become GeoZarr
 //!   `spatial:` attributes (pixel registration, so the start moves back by
 //!   half a step), with `proj:code` EPSG:4326 when those dims are latitude
@@ -314,13 +316,23 @@ impl Numpy {
 }
 
 /// Zarr v3 codecs for a v2 `{compressor, filters}` pair: `bytes`, then the
-/// filters in order, then the compressor.
+/// filters in order, then the compressor. The TIFF horizontal predictor
+/// (imagecodecs `imagecodecs_delta` along the last axis) acts on elements,
+/// so it goes ahead of `bytes`, as `HorizontalDeltaCodec` (wxy-predictor).
 fn codecs(codec: &Value, dtype: Numpy) -> Result<Vec<Value>> {
+    wxy_predictor::register();
     let mut out = vec![json!({"name": "bytes", "configuration": {"endian": dtype.endian()}})];
     let filters = codec["filters"].as_array().cloned().unwrap_or_default();
     let compressor = Some(codec["compressor"].clone()).filter(|c| !c.is_null());
     for c in filters.iter().chain(compressor.iter()) {
         let level = |d: i64| c["level"].as_i64().unwrap_or(d);
+        if c["id"] == "imagecodecs_delta"
+            && c["axis"].as_i64().unwrap_or(-1) == -1
+            && c["dist"].as_i64().unwrap_or(1) == 1
+        {
+            out.insert(0, json!({"name": "HorizontalDeltaCodec"}));
+            continue;
+        }
         out.push(match c["id"].as_str().unwrap_or("") {
             "shuffle" => json!({"name": "numcodecs.shuffle", "configuration": {
                 "elementsize": c["elementsize"].as_u64().unwrap_or(dtype.size())}}),

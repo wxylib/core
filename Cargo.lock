@@ -5093,6 +5093,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wxy-predictor"
+version = "0.0.1"
+dependencies = [
+ "inventory",
+ "serde_json",
+ "zarrs",
+ "zarrs_codec",
+ "zarrs_data_type",
+ "zarrs_metadata",
+ "zarrs_plugin",
+]
+
+[[package]]
 name = "wxy-refs"
 version = "0.0.1"
 dependencies = [
@@ -5110,6 +5123,7 @@ dependencies = [
  "wxy-cache",
  "wxy-domain",
  "wxy-geozarr",
+ "wxy-predictor",
  "wxy-source",
  "wxy-zarr",
  "zarrs",

@@ -46,3 +46,7 @@ required-features = ["refs"]
 [[example]]
 name = "bran_refs"
 required-features = ["refs"]
+
+[[example]]
+name = "refs_windows"
+required-features = ["refs"]

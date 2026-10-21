@@ -13,6 +13,7 @@ wxy-source.workspace = true
 wxy-geozarr.workspace = true
 wxy-zarr = { path = "../wxy-zarr", version = "0.0.1" }
 wxy-cache = { path = "../wxy-cache", version = "0.0.1" }
+wxy-predictor = { path = "../wxy-predictor", version = "0.0.1" }
 async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
