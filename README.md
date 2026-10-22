@@ -11,13 +11,14 @@ The wxylib Cargo workspace. Design, decisions and roadmap are in
 | [`wxy-source`](crates/wxy-source) | S2 | Chunk sources: plan, fetch, decode, with chunking in index space. |
 | [`wxy-tiff`](crates/wxy-tiff) | S2 | GeoTIFF and COG through async-tiff: a Collection plus one chunk source per level. |
 | [`wxy-geozarr`](crates/wxy-geozarr) | S3 | The GeoZarr `spatial:` and `proj:` conventions (v0.1) over JSON attributes; no other wxylib dependency, so any Zarr tool can use it. |
-| [`wxy-zarr`](crates/wxy-zarr) | S3 | Zarr through zarrs: georeferenced by the GeoZarr `spatial:`/`proj:` conventions or CF coordinates; writes GeoZarr grids. |
+| [`wxy-zarr`](crates/wxy-zarr) | S3 | Zarr v2 and v3 through zarrs, from a directory or by URL: georeferenced by the GeoZarr `spatial:`/`proj:` conventions or CF coordinates; writes GeoZarr grids. |
 | [`wxy-virtual`](crates/wxy-virtual) | S3b | Scanners to virtual Zarr: TIFF tile byte ranges as Icechunk virtual references, read back through zarrs. |
 | [`wxy-resample`](crates/wxy-resample) | S5 | GDAL's warp kernels in its arithmetic order, scaled when the target is coarser than the source. No transforms, no I/O. |
 | [`wxy-warp`](crates/wxy-warp) | S4 to S5b | Plan, fetch, resample: GDAL's chunked warp with `wxy-resample` kernels, or one pass through [rwarp](https://github.com/hypertidy/rwarp); regular, rectilinear and curvilinear sources, extra dimensions streamed under one plan; values at points and cells under polygons, each chunk fetched once. |
-| [`wxy-refs`](crates/wxy-refs) | S3c | Byte-reference tables (the mdim-refs Parquet export) read straight as Zarr storage: chunks fetched by range from `file://`, `http(s)://` or `s3://` (credentials and endpoint from `AWS_*`), through `wxy-cache` when given; no Icechunk repository in between. |
+| [`wxy-refs`](crates/wxy-refs) | S3c | Byte-reference tables (the mdim-refs Parquet export, or kerchunk Parquet references) read straight as Zarr storage: chunks fetched by range from `file://`, `http(s)://` or `s3://` (credentials and endpoint from `AWS_*`), through `wxy-cache` when given; no Icechunk repository in between. |
+| [`wxy-predictor`](crates/wxy-predictor) | S3c | The TIFF horizontal predictor (Predictor=2) as a zarrs codec, so tiles of predicted COGs read as virtual Zarr chunks. |
 | [`wxy-cache`](crates/wxy-cache) | m05 C1 | A persistent byte-range cache: wraps a reader, keeps what it fetches (still encoded) as append-only Parquet rows `(source, offset, size, url, data, hash, validator)`, partitioned by source: a reference table with the bytes. |
-| [`wxy-cli`](crates/wxy-cli) | S4, S4c | The `wxy` command: `warp` (to a GeoZarr grid), `points` and `zonal` (CSV out). |
+| [`wxy-cli`](crates/wxy-cli) | S4, S4c | The `wxy` command: `warp` (to a GeoZarr grid), `points` and `zonal` (CSV out), from a GeoTIFF/COG, a Zarr store or a byte-reference table, local or remote. |
 
 ```sh
 git clone https://github.com/wxylib/fixtures ../fixtures   # GDAL oracle data
@@ -65,9 +66,12 @@ gives for the same input, and require identical numbers; the
 cases. They look for wxylib/fixtures at `../fixtures`, or at
 `WXY_FIXTURES`, and skip when it is missing.
 
-A worked example on real data: the
+Worked examples on real data: the
 [OISST walk-through](https://wxylib.org/docs/oisst-virtual.html)
 reads a month of NOAA sea surface temperature as virtual Zarr
-(`cargo run -p wxy-virtual --example oisst_refs`).
+(`cargo run -p wxy-virtual --example oisst_refs`), and
+[a year of BRAN2023](https://wxylib.org/docs/examples/bran/README.html)
+reads an ocean reanalysis on THREDDS through its byte table
+(the `wxy-virtual` example `bran_refs`).
 
 License: MIT OR Apache-2.0.
