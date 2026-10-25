@@ -44,8 +44,9 @@ pub async fn from_kerchunk_at(location: &str) -> Result<Vec<VirtualArray>> {
         format!("file://{}/", p.display())
     };
     let base = url::Url::parse(&dir).map_err(|e| Error::Fetch(format!("{dir}: {e}")))?;
-    let zmeta: Value = serde_json::from_slice(&get(&format!("{dir}.zmetadata")).await?)
-        .map_err(|e| Error::Decode(format!(".zmetadata: {e}")))?;
+    let text = get(&format!("{dir}.zmetadata")).await?;
+    let zmeta: Value =
+        serde_json::from_slice(&text).map_err(|e| Error::Decode(not_json(&text, e)))?;
     let record = zmeta["record_size"]
         .as_u64()
         .filter(|r| *r > 0)
@@ -131,6 +132,24 @@ pub async fn from_kerchunk_at(location: &str) -> Result<Vec<VirtualArray>> {
             .cloned()
             .ok_or_else(|| Error::Decode(format!("{}: no references read", row.name)))
     })
+}
+
+/// The error for a `.zmetadata` that is not JSON, naming bare `NaN` and
+/// `Infinity` tokens (which some writers emit, and JSON does not allow:
+/// Zarr writes them as strings).
+fn not_json(text: &[u8], e: serde_json::Error) -> String {
+    let s = String::from_utf8_lossy(text);
+    let bare = ["NaN", "Infinity"].into_iter().find(|t| {
+        [":", ",", "["].iter().any(|p| {
+            s.contains(&format!("{p}{t}"))
+                || s.contains(&format!("{p} {t}"))
+                || s.contains(&format!("{p}-{t}"))
+        })
+    });
+    match bare {
+        Some(t) => format!(".zmetadata is not strict JSON: a bare {t} token ({e}); the store's writer should write \"{t}\""),
+        None => format!(".zmetadata: {e}"),
+    }
 }
 
 /// The whole object at `url`.
@@ -324,6 +343,16 @@ mod tests {
     use parquet::arrow::ArrowWriter;
 
     #[test]
+    fn bare_nan_is_named() {
+        let text = br#"{"a": {"_FillValue": NaN}}"#;
+        let e = serde_json::from_slice::<Value>(text).unwrap_err();
+        assert!(not_json(text, e).contains("bare NaN"));
+        let text = br#"{"a": "NaN", "b": }"#;
+        let e = serde_json::from_slice::<Value>(text).unwrap_err();
+        assert!(!not_json(text, e).contains("bare"));
+    }
+
+    #[test]
     fn keys_in_c_order() {
         assert_eq!(unravel(0, &[2, 3]), vec![0, 0]);
         assert_eq!(unravel(4, &[2, 3]), vec![1, 1]);
@@ -345,10 +374,13 @@ mod tests {
             json!({"zarr_format": 2, "shape": shape, "chunks": chunks, "dtype": dtype,
                    "compressor": null, "filters": null, "fill_value": null, "order": "C"})
         };
+        let mut vzarray = zarray(&[3, 4], &[3, 2], "<i2");
+        vzarray["fill_value"] = json!(-32767);
         let zmeta = json!({"record_size": 1, "metadata": {
             ".zgroup": {"zarr_format": 2},
-            "v/.zarray": zarray(&[3, 4], &[3, 2], "<i2"),
-            "v/.zattrs": {"_ARRAY_DIMENSIONS": ["y", "x"], "units": ["K"]},
+            "v/.zarray": vzarray,
+            "v/.zattrs": {"_ARRAY_DIMENSIONS": ["y", "x"], "units": ["K"],
+                          "_FillValue": -32768, "missing_value": -32768},
             "y/.zarray": zarray(&[3], &[3], "<f8").to_string(),
             "y/.zattrs": {"_ARRAY_DIMENSIONS": ["y"], "units": ["degrees_north"]},
             "x/.zarray": zarray(&[4], &[4], "<f8"),
@@ -392,6 +424,10 @@ mod tests {
             }]
         );
         assert_eq!(v.metadata["attributes"]["units"], json!("K"));
+        // absent chunks read as the array's fill; the CF fill is kept for
+        // masking, not overwritten by it
+        assert_eq!(v.metadata["fill_value"], json!(-32767));
+        assert_eq!(v.metadata["attributes"]["_FillValue"], json!(-32768));
         assert_eq!(v.metadata["dimension_names"], json!(["y", "x"]));
         // y and x step evenly, so the data carries a GeoZarr transform
         // (corner of the first cell) and EPSG:4326

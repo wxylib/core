@@ -380,8 +380,15 @@ pub(crate) fn referenced(
     inline: Vec<(Vec<u64>, Vec<u8>)>,
 ) -> Result<VirtualArray> {
     let mut attrs = row.attrs.clone();
+    // The array's fill is what an absent chunk reads as; the CF
+    // `_FillValue` is what readers mask. They can differ (VirtualiZarr
+    // takes the HDF5 dataset fill, -32767 for BRAN2023 `temp`, where the
+    // CF attributes say -32768), so a stated `_FillValue` is kept and the
+    // fill only stands in for one that is missing (design m17).
     if let Some(f) = row.fill {
-        attrs.insert("_FillValue".into(), wxy_zarr::write::float_json(f));
+        if attrs.get("_FillValue").map_or(true, Value::is_null) {
+            attrs.insert("_FillValue".into(), wxy_zarr::write::float_json(f));
+        }
     }
     let n = row.dims.len();
     if n >= 2 {
