@@ -20,7 +20,9 @@ wxy-resample.workspace = true
 controlledburn = "0.2.1"
 # plans and options as values (EXPLAIN, dry runs, bindings)
 serde.workspace = true
-proj4rs = { version = "0.1.10", default-features = false, features = ["crs-definitions"] }
+# the same proj4rs rwarp pins: two copies in one wasm build both export
+# proj4rs's wasm-bindgen `Point`, which wasm-bindgen refuses
+proj4rs = { git = "https://github.com/3liz/proj4rs", rev = "764671bd352a15dfbc68ccc8ca5bc2c699935520", default-features = false, features = ["crs-definitions"] }
 rwarp = { git = "https://github.com/hypertidy/rwarp", rev = "4f1ab196e3e270626e4fcc649444b9dfe87de59e", default-features = false, features = ["proj4rs"] }
 
 [dev-dependencies]
