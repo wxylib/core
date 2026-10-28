@@ -34,6 +34,7 @@
 use rwarp::approx::ApproxTransformer;
 use rwarp::source_window::{build_source_grid, compute_source_window, SourceWindow};
 use rwarp::transform::GenImgProjTransformer;
+use rwarp::geoloc_transform::{GeolocArrays, GeolocConvention, GeolocInverse, GeolocOptions};
 pub use rwarp::warp::ResampleAlg;
 use rwarp::warp::{KernelScaling, SourceBuffer};
 use serde::{Deserialize, Serialize};
@@ -45,7 +46,6 @@ use wxy_source::{read_window, Buffer, ChunkSource, Error, Result, Values, Window
 mod cover;
 mod explain;
 mod extract;
-mod geoloc;
 mod rasterize;
 mod zonal;
 
@@ -274,7 +274,7 @@ pub struct SourceGrid {
     pub x_dim: usize,
     pub shape: Vec<u64>,
     /// GDAL's geolocation-array transformer, for a curvilinear source.
-    geoloc: Option<Arc<geoloc::GeoLoc>>,
+    geoloc: Option<Arc<GeolocArrays>>,
 }
 
 /// GDAL's geotransform for "pixel and georeferenced coordinates are the
@@ -325,14 +325,29 @@ impl SourceGrid {
                         m.cell
                     )));
                 }
-                let g = geoloc::GeoLoc::new(
-                    nx,
-                    ny,
+                // GDAL interpolates longitudes across the antimeridian when
+                // the arrays' CRS is geographic and every longitude is in
+                // [-180, 180]
+                let lon180 = proj(crs)?.is_latlong()
+                    && lon
+                        .values
+                        .iter()
+                        .filter(|v| !v.is_nan())
+                        .all(|v| (-180.0..=180.0).contains(v));
+                let convention = if edge == 1 {
+                    GeolocConvention::TopLeftCorner
+                } else {
+                    GeolocConvention::PixelCenter
+                };
+                let g = GeolocArrays::new(
                     lon.values.clone(),
                     lat.values.clone(),
-                    None,
-                    edge == 1,
-                    proj(crs)?.is_latlong(),
+                    nx,
+                    ny,
+                    GeolocOptions::default()
+                        .with_convention(convention)
+                        .with_lon_wrap(lon180)
+                        .with_inverse(GeolocInverse::Backmap),
                 )
                 .map_err(Error::Unsupported)?;
                 (IDENTITY, Some(Arc::new(g)))
@@ -381,40 +396,19 @@ impl SourceGrid {
     }
 }
 
-/// rwarp's approximate transformer, with a shim for an rwarp issue found
-/// against GDAL here (the fix is with rwarp's author; remove this when a
-/// release carries it): a subdivided scanline can leave one point
-/// untransformed and marked failed; such points are transformed exactly,
-/// as GDAL does.
+/// rwarp's approximate transformer over the exact one, with source
+/// longitudes wrapped and pole rows clamped afterwards for a global lon/lat
+/// source (`wrap_globe`). The exact transformer wraps longitudes as GDAL
+/// does (`CENTER_LONG`, rwarp's [`GenImgProjTransformer::with_source_size`]),
+/// under the approximation, so interpolation sees the wrap's jump and a
+/// 0..360 source matches GDAL at its 0/360 seam; the wrap here then only
+/// catches points just past a -180..180 source's edge.
 struct Approx {
     /// `None` when the error threshold is 0: every point exact, as GDAL
     /// does without its approximate transformer.
-    approx: Option<ApproxTransformer<Globe>>,
-    exact: Globe,
-    /// The same wrap, applied again after interpolation: for a -180..180
-    /// source, the only wrap, catching points just past its edge.
+    approx: Option<ApproxTransformer<GenImgProjTransformer>>,
+    exact: GenImgProjTransformer,
     globe: Option<(f64, Option<f64>)>,
-}
-
-/// The exact transformer, with source longitudes wrapped when the source
-/// covers the globe but does not start at -180. This is where GDAL wraps
-/// (its `+lon_wrap` for sources outside -180..180), under the approximate
-/// transformer, so interpolation sees the wrap's jump and subdivides across
-/// it: a 0..360 source then matches GDAL at its 0/360 seam. A -180..180
-/// source is not wrapped here, so its approximation stays GDAL's.
-struct Globe {
-    inner: GenImgProjTransformer,
-    globe: Option<(f64, Option<f64>)>,
-}
-
-impl rwarp::Transformer for Globe {
-    fn transform(&self, dst_to_src: bool, x: &mut [f64], y: &mut [f64]) -> Vec<bool> {
-        let ok = self.inner.transform(dst_to_src, x, y);
-        if dst_to_src {
-            wrap(self.globe, x, y, &ok);
-        }
-        ok
-    }
 }
 
 /// Wrap source columns into `[0, w)` and clamp pole rows to the source,
@@ -432,22 +426,10 @@ fn wrap(globe: Option<(f64, Option<f64>)>, x: &mut [f64], y: &mut [f64], ok: &[b
 
 impl rwarp::Transformer for Approx {
     fn transform(&self, dst_to_src: bool, x: &mut [f64], y: &mut [f64]) -> Vec<bool> {
-        let (x0, y0) = (x.to_vec(), y.to_vec());
-        let mut ok = match &self.approx {
+        let ok = match &self.approx {
             Some(a) => a.transform(dst_to_src, x, y),
             None => self.exact.transform(dst_to_src, x, y),
         };
-        let failed: Vec<usize> = (0..ok.len()).filter(|&i| !ok[i]).collect();
-        if !failed.is_empty() {
-            let mut fx: Vec<f64> = failed.iter().map(|&i| x0[i]).collect();
-            let mut fy: Vec<f64> = failed.iter().map(|&i| y0[i]).collect();
-            let fok = self.exact.transform(dst_to_src, &mut fx, &mut fy);
-            for (k, &i) in failed.iter().enumerate() {
-                x[i] = fx[k];
-                y[i] = fy[k];
-                ok[i] = fok[k];
-            }
-        }
         if dst_to_src {
             wrap(self.globe, x, y, &ok);
         }
@@ -458,12 +440,9 @@ impl rwarp::Transformer for Approx {
 fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<Approx> {
     let threshold = opts.error_threshold;
     let globe = if opts.wrap_globe { src.globe()? } else { None };
-    let west =
-        src.geotransform[0].min(src.geotransform[0] + src.geotransform[1] * src.size()[0] as f64);
-    let under = globe.filter(|_| (west + 180.0).abs() > 0.01 * src.geotransform[1].abs());
     let same = same_crs(&src.crs, &dst.crs);
-    let make = || -> Result<Globe> {
-        let inner = if let Some(g) = &src.geoloc {
+    let make = || -> Result<GenImgProjTransformer> {
+        if let Some(g) = &src.geoloc {
             let (to_src, to_dst) = if same {
                 (None, None)
             } else {
@@ -492,12 +471,9 @@ fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<A
             )
         } else {
             GenImgProjTransformer::new(&src.crs, src.geotransform, &dst.crs, dst.geotransform)
+                .map(|t| t.with_source_size(src.size().map(|n| n as usize)))
         }
-        .map_err(Error::Unsupported)?;
-        Ok(Globe {
-            inner,
-            globe: under,
-        })
+        .map_err(Error::Unsupported)
     };
     Ok(Approx {
         approx: if threshold > 0.0 {
@@ -532,7 +508,7 @@ impl rwarp::CrsTransform for Identity {
 /// It sits where a CRS transform goes, under an identity source
 /// geotransform, so the approximate transformer wraps it unchanged.
 struct GeolocToSource {
-    geoloc: Arc<geoloc::GeoLoc>,
+    geoloc: Arc<GeolocArrays>,
     reproject: Option<Box<dyn rwarp::CrsTransform>>,
 }
 
@@ -542,28 +518,22 @@ impl rwarp::CrsTransform for GeolocToSource {
             Some(r) => r.convert(x, y)?,
             None => (x, y),
         };
-        let (mut xs, mut ys, mut ok) = ([x], [y], [true]);
-        self.geoloc.inverse(&mut xs, &mut ys, &mut ok);
-        ok[0].then_some((xs[0], ys[0]))
+        self.geoloc.geo_to_pixel(x, y)
     }
 }
 
 /// Curvilinear source pixels to target CRS positions.
 struct GeolocToTarget {
-    geoloc: Arc<geoloc::GeoLoc>,
+    geoloc: Arc<GeolocArrays>,
     reproject: Option<Box<dyn rwarp::CrsTransform>>,
 }
 
 impl rwarp::CrsTransform for GeolocToTarget {
     fn convert(&self, x: f64, y: f64) -> Option<(f64, f64)> {
-        let (mut xs, mut ys, mut ok) = ([x], [y], [true]);
-        self.geoloc.forward(&mut xs, &mut ys, &mut ok);
-        if !ok[0] {
-            return None;
-        }
+        let (x, y) = self.geoloc.pixel_to_geo(x, y)?;
         match &self.reproject {
-            Some(r) => r.convert(xs[0], ys[0]),
-            None => Some((xs[0], ys[0])),
+            Some(r) => r.convert(x, y),
+            None => Some((x, y)),
         }
     }
 }
