@@ -126,3 +126,26 @@ async fn polygon_cells_match_gdal() {
     }
     assert_eq!(bad, 0, "polygons whose cells differ from GDAL's");
 }
+
+/// A polygon with a hole, cut through cells, on the half degree world: the
+/// covered area is the exterior's less the hole's, the hole's interior
+/// cells are left out, and its boundary cells are half covered.
+#[tokio::test]
+async fn coverage_subtracts_holes() {
+    let Ok(ds) = wxy_tiff::open_path(fixtures().join("cog/world-int16-deflate.tif")).await else {
+        eprintln!("skipping: no fixtures at {}", fixtures().display());
+        return;
+    };
+    let square = |a: f64, b: f64| vec![[a, a], [b, a], [b, b], [a, b], [a, a]];
+    let polygon = vec![square(0.0, 10.0), square(2.25, 7.75)];
+    let cover = polygon_coverage(&ds.collection.domains[0], "EPSG:4326", &[polygon]).unwrap();
+    let total: f64 = cover[0].iter().map(|c| c.1).sum();
+    // cells of 0.5 degrees: 4 to a square degree
+    let want = (100.0 - 5.5 * 5.5) * 4.0;
+    assert!((total - want).abs() < 1e-6, "covered {total}, want {want}");
+    // lat 5, lon 5 is row 170, col 370, inside the hole
+    assert!(cover[0].iter().all(|c| c.0 != [170, 370]), "a hole cell is covered");
+    // the hole's west edge (lon 2.25) halves col 364
+    let edge = cover[0].iter().find(|c| c.0 == [170, 364]).unwrap();
+    assert!((edge.1 - 0.5).abs() < 1e-6, "edge cell {edge:?}");
+}

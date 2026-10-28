@@ -14,8 +14,9 @@
 //! By default (stage S5, [`WarpOptions::chunked`]) warps run as GDAL's
 //! warp operation does instead: chunk by chunk, with the source windows
 //! and kernel scales of GDAL's warper, so that a target coarser than the
-//! source is smoothed as GDAL smooths it, with rwarp's kernels on each
-//! chunk. The steps above remain as the plain route.
+//! source is smoothed as GDAL smooths it. rwarp's `plan` module plans the
+//! chunks (GDAL 3.14's `CollectChunkList`) and `warp_chunks` warps them.
+//! The steps above remain as the plain route.
 //!
 //! Any dims before y and x (time, depth, band) are leading dims (stage
 //! S4b): [`WarpPlan`] plans once from the spatial dims and warps the
@@ -41,7 +42,6 @@ use std::sync::Arc;
 use wxy_domain::{CellConvention, CoordArray, Domain, Frame, Mapping, Positions};
 use wxy_source::{read_window, Buffer, ChunkSource, Error, Result, Values, Window};
 
-mod chunked;
 mod cover;
 mod explain;
 mod extract;
@@ -157,23 +157,21 @@ impl WarpOptions {
         scaling: KernelScaling,
         nodata: Option<T>,
     ) -> rwarp::warp::WarpOptions {
-        rwarp::warp::WarpOptions {
-            alg: self.resampling,
-            scaling,
-            footprint: match self.footprint {
-                Footprint::Box => rwarp::warp::Footprint::GdalBox,
-                Footprint::Exact { densify } => rwarp::warp::Footprint::Exact { densify },
-            },
-            mode_ties: match self.mode_ties {
-                ModeTies::First => rwarp::warp::ModeTies::First,
-                ModeTies::Min => rwarp::warp::ModeTies::Min,
-                ModeTies::Max => rwarp::warp::ModeTies::Max,
-            },
-            src_nodata: nodata.map_or(rwarp::warp::Nodata::None, |v| {
-                rwarp::warp::Nodata::Value(v.to_f64())
-            }),
-            ..Default::default()
-        }
+        let mut o = rwarp::warp::WarpOptions::new(self.resampling);
+        o.scaling = scaling;
+        o.footprint = match self.footprint {
+            Footprint::Box => rwarp::warp::Footprint::GdalBox,
+            Footprint::Exact { densify } => rwarp::warp::Footprint::Exact { densify },
+        };
+        o.mode_ties = match self.mode_ties {
+            ModeTies::First => rwarp::warp::ModeTies::First,
+            ModeTies::Min => rwarp::warp::ModeTies::Min,
+            ModeTies::Max => rwarp::warp::ModeTies::Max,
+        };
+        o.src_nodata = nodata.map_or(rwarp::warp::Nodata::None, |v| {
+            rwarp::warp::Nodata::Value(v.to_f64())
+        });
+        o
     }
 }
 
@@ -213,6 +211,11 @@ mod resample_alg {
             ResampleAlg::Q1 => "q1",
             ResampleAlg::Q3 => "q3",
             ResampleAlg::Rms => "rms",
+            other => {
+                return Err(serde::ser::Error::custom(format!(
+                    "resampling {other:?} has no name here"
+                )))
+            }
         })
     }
 
@@ -253,7 +256,7 @@ impl Default for WarpOptions {
             wrap_globe: true,
             chunked: true,
             overview: Overview::Auto,
-            memory_limit: chunked::MEMORY_LIMIT,
+            memory_limit: rwarp::plan::DEFAULT_MEMORY_LIMIT,
         }
     }
 }
@@ -688,7 +691,7 @@ enum Route {
     Empty,
     /// GDAL's chunked warp (S5), over source region `(offset, size)`.
     Chunked {
-        chunks: Vec<chunked::Chunk>,
+        plan: rwarp::plan::WarpPlan,
         region: ([i32; 2], [i32; 2]),
     },
     /// rwarp in one pass, over this source window.
@@ -713,35 +716,18 @@ impl WarpPlan {
                     .ok_or_else(|| Error::Unsupported(format!("warping {dtype:?}")))?;
                 let t = transformer(&src, dst, opts)?;
                 let special = special_points(&src, dst);
-                let mut planner = chunked::Planner::new(
+                let plan = rwarp::plan::plan_chunks(
                     &t,
-                    src.size(),
-                    [dst.size[0] as i32, dst.size[1] as i32],
-                    opts.resampling.radius(),
-                    special,
-                    src.globe()?,
-                    bits,
-                    nodata.is_some(),
-                    src.geoloc.is_none(),
+                    src.size().map(|v| v as usize),
+                    dst.size,
+                    &chunk_options(&src, opts, special, bits, nodata.is_some())?,
                 );
-                planner.memory_limit = opts.memory_limit;
-                planner.kernel_scale = opts.kernel_scale;
-                let chunks = planner.chunks();
-                let live: Vec<&chunked::Chunk> = chunks.iter().filter(|c| !c.is_empty()).collect();
-                if live.is_empty() {
-                    Route::Empty
-                } else {
-                    let lo = |i: usize| live.iter().map(|c| c.src_off[i]).min().unwrap();
-                    let hi = |i: usize| {
-                        live.iter()
-                            .map(|c| c.src_off[i] + c.src_size[i])
-                            .max()
-                            .unwrap()
-                    };
-                    let (x0, y0) = (lo(0), lo(1));
-                    let region = ([x0, y0], [hi(0) - x0, hi(1) - y0]);
-                    drop(live);
-                    Route::Chunked { chunks, region }
+                match plan.src_region() {
+                    None => Route::Empty,
+                    Some((off, size)) => Route::Chunked {
+                        region: (off.map(|v| v as i32), size.map(|v| v as i32)),
+                        plan,
+                    },
                 }
             }
             false => match plan(&src, dst, opts)? {
@@ -881,25 +867,24 @@ impl WarpPlan {
         let b = n_slices;
         let values = match &self.route {
             Route::Empty => unreachable!("an empty route has no region"),
-            Route::Chunked { chunks, .. } => {
-                let origin = [x0 as i32, y0 as i32];
-                let extent = [xs as i32, ys as i32];
+            Route::Chunked { plan, .. } => {
                 macro_rules! run {
                     ($v:expr, $variant:ident, $t:ty) => {{
-                        let nd = nodata.map(|n| n as $t);
-                        let mut out = vec![nd.unwrap_or(0 as $t); b * n_dst];
+                        // each chunk's scale and offset replace these
+                        let o = self
+                            .opts
+                            .rwarp(KernelScaling::Point, nodata.map(|n| n as $t));
+                        let mut out = Vec::with_capacity(b * n_dst);
                         for k in 0..b {
-                            chunked::warp_band::<$t>(
-                                &t,
-                                chunks,
-                                &self.opts,
-                                &$v[k * n_src..(k + 1) * n_src],
-                                origin,
-                                extent,
-                                &mut out[k * n_dst..(k + 1) * n_dst],
-                                ncol,
-                                nd,
-                            );
+                            let src = SourceBuffer {
+                                data: &$v[k * n_src..(k + 1) * n_src],
+                                ncol: xs as usize,
+                                nrow: ys as usize,
+                                nbands: 1,
+                                col_off: x0 as usize,
+                                row_off: y0 as usize,
+                            };
+                            out.extend(rwarp::plan::warp_chunks::<$t, $t>(&t, plan, &src, &o));
                         }
                         Values::$variant(out)
                     }};
@@ -1178,6 +1163,52 @@ fn axis(domain: &Domain, d: usize, cell: CellConvention) -> Result<(Vec<f64>, Fr
         }
     };
     Ok((v, m.frame.clone()))
+}
+
+/// rwarp's chunk planning (GDAL's `CollectChunkList` and
+/// `ComputeSourceWindow`, 3.14), set as gdalwarp plans: kernel scales
+/// estimated at the target's top-left as GDAL does, with two differences
+/// from GDAL, both kept from wxylib's own planner: windows are padded for
+/// a given kernel scale (`--kernel-scale`), and forward-probe points of an
+/// affine source must transform back to where they started (proj4rs
+/// returns a point at a polar projection's antipode where PROJ fails).
+fn chunk_options(
+    src: &SourceGrid,
+    opts: &WarpOptions,
+    special: Vec<(f64, f64)>,
+    bits: usize,
+    nodata: bool,
+) -> Result<rwarp::plan::ChunkOptions> {
+    use rwarp::plan::{ChunkOptions, RoundTrip};
+    let scaling = match opts.kernel_scale {
+        Some([x, y]) => KernelScaling::Fixed { x, y },
+        None => KernelScaling::WidenWhenDownsampling,
+    };
+    // a curvilinear source's edges can wrap onto each other, so its
+    // points go back elsewhere; GDAL checks none
+    let round_trip = match src.geoloc {
+        Some(_) => None,
+        None => {
+            let mut r = RoundTrip::default();
+            if let Some((w, h)) = src.globe()? {
+                r = r.with_wrap_width(w);
+                if let Some(h) = h {
+                    r = r.with_pole_rows(h);
+                }
+            }
+            Some(r)
+        }
+    };
+    let mut c = ChunkOptions::gdalwarp(opts.resampling)
+        .with_scaling(scaling)
+        .with_pad_for_fixed_scale(true)
+        .with_memory_limit(opts.memory_limit)
+        .with_special_points(special.into_iter().map(|(x, y)| [x, y]).collect())
+        .with_round_trip(round_trip);
+    let mask = if nodata { 1.0 } else { 0.0 };
+    c.src_pixel_bits = bits as f64 + mask;
+    c.dst_pixel_bits = bits as f64 + mask;
+    Ok(c)
 }
 
 fn special_points(src: &SourceGrid, dst: &GridSpec) -> Vec<(f64, f64)> {

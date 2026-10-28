@@ -45,8 +45,7 @@ pub enum ZoneCells {
 }
 
 /// A span of cells on one row, `c0..c1` (exclusive), with a weight: 1 for
-/// whole cells, the covered fraction for a coverage edge cell, negative
-/// for a hole's.
+/// whole cells, the covered fraction for a coverage edge cell.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Span {
     pub(crate) row: u32,
@@ -152,11 +151,7 @@ impl Burner {
     }
 
     /// Exact cover of every feature (each a set of polygons), from
-    /// controlledburn in index space. Each ring is burned alone and holes
-    /// subtracted: controlledburn 0.2.1 drops a hole's boundary cells where
-    /// the exterior covers them (a patch is with hypertidy). The holes of a
-    /// valid polygon lie inside its exterior and apart, so the signed sum
-    /// is exact.
+    /// controlledburn in index space, each polygon burned with its holes.
     pub(crate) fn coverage(
         &self,
         features: &[Vec<Rings>],
@@ -175,33 +170,34 @@ impl Burner {
         let (mut geoms, mut owner) = (Vec::new(), Vec::new());
         for (k, polys) in features.iter().enumerate() {
             for rings in polys {
-                for (i, r) in rings.iter().enumerate() {
-                    let (ring, _) = self.index_ring(r, densify);
-                    let ring = ring.iter().map(|p| Coord::new(p[0], -p[1])).collect();
-                    geoms.push(Geometry::Polygon(Polygon::new(vec![ring])));
-                    owner.push((k, if i == 0 { 1.0f32 } else { -1.0 }));
-                }
+                let rings = rings
+                    .iter()
+                    .map(|r| {
+                        let (ring, _) = self.index_ring(r, densify);
+                        ring.iter().map(|p| Coord::new(p[0], -p[1])).collect()
+                    })
+                    .collect();
+                geoms.push(Geometry::Polygon(Polygon::new(rings)));
+                owner.push(k);
             }
         }
         let r = burn(&geoms, &grid, BurnOptions::coverage())
             .map_err(|e| Error::Unsupported(format!("coverage: {e}")))?;
         let mut out = vec![Vec::new(); features.len()];
         for run in &r.runs {
-            let (k, sign) = owner[run.id as usize];
-            out[k].push(Span {
+            out[owner[run.id as usize]].push(Span {
                 row: run.row as u32,
                 c0: run.col_start as u32,
                 c1: run.col_end as u32,
-                w: sign,
+                w: 1.0,
             });
         }
         for e in &r.edges {
-            let (k, sign) = owner[e.id as usize];
-            out[k].push(Span {
+            out[owner[e.id as usize]].push(Span {
                 row: e.row as u32,
                 c0: e.col as u32,
                 c1: e.col as u32 + 1,
-                w: sign * e.fraction,
+                w: e.fraction,
             });
         }
         Ok(out)
@@ -252,7 +248,7 @@ pub fn polygon_coverage(
         .collect())
 }
 
-/// Signed spans to `(cell, fraction)`, sorted, empty cells dropped.
+/// Spans to `(cell, fraction)`, sorted, empty cells dropped.
 pub(crate) fn cell_covers(spans: Vec<Span>) -> Vec<CellCover> {
     let mut acc: BTreeMap<[u64; 2], f64> = BTreeMap::new();
     for s in spans {
