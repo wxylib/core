@@ -151,14 +151,60 @@ impl Burner {
     }
 
     /// Exact cover of every feature (each a set of polygons), from
-    /// controlledburn in index space, each polygon burned with its holes.
+    /// controlledburn in index space, each polygon with its holes. A small
+    /// polygon (its box under [`SMALL_WINDOW`] cells) is resolved on a
+    /// dense window ([`controlledburn::CoverageWindow`]); larger ones go
+    /// through the sparse burn.
     pub(crate) fn coverage(
         &self,
         features: &[Vec<Rings>],
         densify: Option<f64>,
     ) -> Result<Vec<Vec<Span>>> {
-        use controlledburn::{burn, BurnOptions, Coord, Geometry, GridSpec as BurnGrid, Polygon};
-        // index space with y up: (pixel, -line) on a grid of unit cells
+        use controlledburn::{
+            burn, BurnOptions, Coord, CoverageWindow, Geometry, GridSpec as BurnGrid, Polygon,
+        };
+        let mut out = vec![Vec::new(); features.len()];
+        let mut window = CoverageWindow::default();
+        let (mut geoms, mut owner) = (Vec::new(), Vec::new());
+        for (k, polys) in features.iter().enumerate() {
+            for rings in polys {
+                let rings: Vec<(Vec<f64>, Vec<f64>)> = rings
+                    .iter()
+                    .map(|r| {
+                        self.index_ring(r, densify)
+                            .0
+                            .iter()
+                            .map(|p| (p[0], p[1]))
+                            .unzip()
+                    })
+                    .collect();
+                let Some((xs, ys)) = rings.first() else {
+                    continue;
+                };
+                if window.reset_to_ring(xs, ys) && window.ncol() * window.nrow() <= SMALL_WINDOW {
+                    for (i, (xs, ys)) in rings.iter().enumerate() {
+                        window.add_ring(xs, ys, if i == 0 { 1.0 } else { -1.0 });
+                    }
+                    self.window_spans(&mut window, &mut out[k]);
+                    continue;
+                }
+                // index space with y up: (pixel, -line) on unit cells
+                let rings = rings
+                    .iter()
+                    .map(|(xs, ys)| {
+                        xs.iter()
+                            .zip(ys)
+                            .map(|(x, y)| Coord::new(*x, -*y))
+                            .collect()
+                    })
+                    .collect();
+                geoms.push(Geometry::Polygon(Polygon::new(rings)));
+                owner.push(k);
+            }
+        }
+        if geoms.is_empty() {
+            return Ok(out);
+        }
         let grid = BurnGrid::new(
             0.0,
             -(self.h as f64),
@@ -167,23 +213,8 @@ impl Burner {
             self.w as u32,
             self.h as u32,
         );
-        let (mut geoms, mut owner) = (Vec::new(), Vec::new());
-        for (k, polys) in features.iter().enumerate() {
-            for rings in polys {
-                let rings = rings
-                    .iter()
-                    .map(|r| {
-                        let (ring, _) = self.index_ring(r, densify);
-                        ring.iter().map(|p| Coord::new(p[0], -p[1])).collect()
-                    })
-                    .collect();
-                geoms.push(Geometry::Polygon(Polygon::new(rings)));
-                owner.push(k);
-            }
-        }
         let r = burn(&geoms, &grid, BurnOptions::coverage())
             .map_err(|e| Error::Unsupported(format!("coverage: {e}")))?;
-        let mut out = vec![Vec::new(); features.len()];
         for run in &r.runs {
             out[owner[run.id as usize]].push(Span {
                 row: run.row as u32,
@@ -202,7 +233,60 @@ impl Burner {
         }
         Ok(out)
     }
+
+    /// A resolved window's cells on the grid as spans: full cells merged
+    /// into runs, partial ones one cell each.
+    fn window_spans(&self, window: &mut controlledburn::CoverageWindow, out: &mut Vec<Span>) {
+        let (c0, r0, nc) = (window.col0(), window.row0(), window.ncol());
+        for (j, row) in window.resolve().chunks(nc.max(1)).enumerate() {
+            let r = r0 + j as i64;
+            if r < 0 || r >= self.h as i64 {
+                continue;
+            }
+            let mut run: Option<u32> = None;
+            for (i, &f) in row.iter().enumerate() {
+                let c = c0 + i as i64;
+                let full = (f - 1.0).abs() < 1e-9;
+                let on = c >= 0 && c < self.w as i64;
+                if let Some(s) = run.filter(|_| !(on && full)) {
+                    out.push(Span {
+                        row: r as u32,
+                        c0: s,
+                        c1: c as u32,
+                        w: 1.0,
+                    });
+                    run = None;
+                }
+                if !on {
+                    continue;
+                }
+                if full {
+                    run.get_or_insert(c as u32);
+                } else if f > 1e-9 {
+                    out.push(Span {
+                        row: r as u32,
+                        c0: c as u32,
+                        c1: c as u32 + 1,
+                        w: f as f32,
+                    });
+                }
+            }
+            if let Some(s) = run {
+                let end = (c0 + nc as i64).min(self.w as i64);
+                out.push(Span {
+                    row: r as u32,
+                    c0: s,
+                    c1: end as u32,
+                    w: 1.0,
+                });
+            }
+        }
+    }
 }
+
+/// The most cells a polygon's box may hold for its cover to be resolved on
+/// a dense window rather than burned sparsely.
+const SMALL_WINDOW: usize = 1 << 16;
 
 /// The cells of a source each polygon covers, as GDAL's rasterizer burns
 /// them for that polygon alone: a cell whose centre is inside, or with

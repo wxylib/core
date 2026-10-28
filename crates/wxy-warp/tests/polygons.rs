@@ -144,7 +144,10 @@ async fn coverage_subtracts_holes() {
     let want = (100.0 - 5.5 * 5.5) * 4.0;
     assert!((total - want).abs() < 1e-6, "covered {total}, want {want}");
     // lat 5, lon 5 is row 170, col 370, inside the hole
-    assert!(cover[0].iter().all(|c| c.0 != [170, 370]), "a hole cell is covered");
+    assert!(
+        cover[0].iter().all(|c| c.0 != [170, 370]),
+        "a hole cell is covered"
+    );
     // the hole's west edge (lon 2.25) halves col 364
     let edge = cover[0].iter().find(|c| c.0 == [170, 364]).unwrap();
     assert!((edge.1 - 0.5).abs() < 1e-6, "edge cell {edge:?}");
