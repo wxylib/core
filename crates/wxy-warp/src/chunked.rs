@@ -21,7 +21,7 @@
 use rwarp::warp::{KernelScaling, SourceBuffer};
 use rwarp::Transformer;
 
-use crate::{Approx, ResampleAlg, WarpOptions};
+use crate::{footprint_method, Approx, WarpOptions};
 
 /// GDAL's `DEFAULT_STEP_COUNT`.
 const STEPS: usize = 21;
@@ -516,7 +516,7 @@ pub(crate) fn warp_band<T: rwarp::warp::Sample>(
         o.dst_row_off = dy0;
         let tile = match opts.resampling {
             // footprints from cell corners, which GDAL does not retry
-            ResampleAlg::Average | ResampleAlg::Mode => rwarp::warp::warp(t, &buf, cw, ch, &o),
+            alg if footprint_method(alg) => rwarp::warp::warp(t, &buf, cw, ch, &o),
             _ => {
                 let retry = Retry {
                     t,
