@@ -3775,9 +3775,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rwarp"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83adaf7364841ef4244eee397e352ce06c0585ff05547b01fb6ec05e76fdc67d"
+checksum = "188cb8dca476923b35761be4088f46e812787c17d0c3407c83e7614aca13bb46"
 dependencies = [
  "controlledburn",
  "proj4rs",

@@ -193,16 +193,14 @@ impl WarpPlan {
         let (route, warp_chunks) = match &self.route {
             Route::Empty => ("empty", Vec::new()),
             Route::Plain(_) => ("plain", Vec::new()),
-            Route::Chunked { chunks, .. } => (
+            Route::Chunked { plan, .. } => (
                 "chunked",
-                chunks
-                    .iter()
-                    .filter(|c| !c.is_empty())
+                plan.live()
                     .map(|c| WarpChunk {
-                        dst_offset: c.dst_off,
-                        dst_size: c.dst_size,
-                        src_offset: c.src_off,
-                        src_size: c.src_size,
+                        dst_offset: c.dst_off.map(|v| v as i32),
+                        dst_size: c.dst_size.map(|v| v as i32),
+                        src_offset: c.src_off.map(|v| v as i32),
+                        src_size: c.src_size.map(|v| v as i32),
                         kernel_scale: c.scale,
                     })
                     .collect(),

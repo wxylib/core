@@ -19,7 +19,7 @@ serde.workspace = true
 # proj4rs's wasm-bindgen `Point`, which wasm-bindgen refuses
 proj4rs = { version = "0.3.0", default-features = false, features = ["crs-definitions"] }
 # rwarp is external (design doc 03, A2): the kernels the chunked warp runs
-rwarp = { version = "0.2.0", default-features = false, features = ["proj4rs"] }
+rwarp = { version = "0.3.0", default-features = false, features = ["proj4rs"] }
 
 [dev-dependencies]
 async-trait.workspace = true
