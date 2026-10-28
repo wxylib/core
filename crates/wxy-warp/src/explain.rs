@@ -90,6 +90,11 @@ pub struct WarpChunk {
     pub dst_size: [i32; 2],
     pub src_offset: [i32; 2],
     pub src_size: [i32; 2],
+    /// The kernel scale, target cells per source cell along x and y;
+    /// below 1 the interpolating kernels stretch by its reciprocal. One
+    /// scale for every tile (the smallest over the chunks, say), given as
+    /// `kernel_scale`, keeps separately warped tiles seamless.
+    pub kernel_scale: [f64; 2],
 }
 
 /// What the operation planned.
@@ -198,6 +203,7 @@ impl WarpPlan {
                         dst_size: c.dst_size,
                         src_offset: c.src_off,
                         src_size: c.src_size,
+                        kernel_scale: c.scale,
                     })
                     .collect(),
             ),

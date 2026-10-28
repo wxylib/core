@@ -1,6 +1,10 @@
 //! The chunked warp: GDAL's warp operation, chunk by chunk, with the
 //! wxy-resample kernels (design doc 03, S5).
 //!
+//! Nearest, bilinear and cubic run wxy-resample's kernels (GDAL 3.12's);
+//! lanczos, average and mode run rwarp's `warp` on each chunk, with the
+//! chunk's source window and the kernel scale GDAL 3.12 gives the chunk.
+//!
 //! GDAL splits the target into chunks (`CollectChunkList`), computes each
 //! chunk's source window (`ComputeSourceWindow`) and, from the window's
 //! size, how much to stretch the kernel (`PerformWarp`). The chunk
@@ -14,10 +18,20 @@
 //! switch for), destination alpha, cutlines and source masks other than
 //! nodata.
 
+use rwarp::warp::{KernelScaling, ResampleAlg, SourceBuffer};
 use rwarp::Transformer;
 use wxy_resample::{write_density, Kernel, Method, Sample, Scale, Window, BAND_DENSITY_THRESHOLD};
 
-use crate::Approx;
+use crate::{Approx, WarpOptions};
+
+/// The kernels a chunked warp runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ChunkKernel {
+    /// wxy-resample's port of GDAL 3.12's kernels.
+    Resample(Method),
+    /// rwarp's `warp`, one call per chunk.
+    Rwarp(ResampleAlg),
+}
 
 /// GDAL's `DEFAULT_STEP_COUNT`.
 const STEPS: usize = 21;
@@ -33,6 +47,8 @@ pub(crate) struct Chunk {
     pub src_size: [i32; 2],
     /// Kernel margin included in `src_size` (GDAL's `dfSrcXExtraSize`).
     pub extra: [f64; 2],
+    /// The kernel scale, target cells per source cell along x and y.
+    pub scale: [f64; 2],
 }
 
 impl Chunk {
@@ -87,6 +103,8 @@ pub(crate) struct Planner<'a> {
     /// Bytes a chunk's working memory may take before it is split
     /// (GDAL's `dfWarpMemoryLimit`, gdalwarp's `-wm`).
     pub memory_limit: f64,
+    /// The kernel scale given for every chunk ([`WarpOptions::kernel_scale`]).
+    pub kernel_scale: Option<[f64; 2]>,
 }
 
 impl<'a> Planner<'a> {
@@ -95,7 +113,7 @@ impl<'a> Planner<'a> {
         t: &'a Approx,
         src: [i32; 2],
         dst: [i32; 2],
-        method: Method,
+        radius: i32,
         special: Vec<(f64, f64)>,
         globe: Option<(f64, Option<f64>)>,
         dtype_bits: usize,
@@ -107,7 +125,7 @@ impl<'a> Planner<'a> {
             t,
             src,
             dst,
-            radius: method.radius(),
+            radius,
             special,
             source_grid: std::cell::OnceCell::new(),
             src_bits: dtype_bits as f64 + mask,
@@ -116,6 +134,7 @@ impl<'a> Planner<'a> {
             pole_rows: globe.and_then(|g| g.1),
             check_round_trip,
             memory_limit: MEMORY_LIMIT,
+            kernel_scale: None,
         }
     }
 
@@ -126,6 +145,9 @@ impl<'a> Planner<'a> {
     pub fn chunks(&self) -> Vec<Chunk> {
         let mut out = Vec::new();
         self.collect([0, 0], self.dst, &mut out);
+        for c in out.iter_mut().filter(|c| !c.is_empty()) {
+            c.scale = chunk_scale(self.t, c, self.kernel_scale);
+        }
         out.sort_by(|a, b| (a.dst_off[1], a.dst_off[0]).cmp(&(b.dst_off[1], b.dst_off[0])));
         out
     }
@@ -155,6 +177,7 @@ impl<'a> Planner<'a> {
             src_off: w.off,
             src_size: w.size,
             extra: w.extra,
+            scale: [1.0, 1.0],
         });
     }
 
@@ -365,8 +388,16 @@ impl<'a> Planner<'a> {
         let [min_x, min_y, max_x, max_y] = b.map(snap);
 
         let r = self.radius;
-        let xscale = (size[0] as f64 / (max_x - min_x)).max(1e-3);
-        let yscale = (size[1] as f64 / (max_y - min_y)).max(1e-3);
+        let mut xscale = (size[0] as f64 / (max_x - min_x)).max(1e-3);
+        let mut yscale = (size[1] as f64 / (max_y - min_y)).max(1e-3);
+        // GDAL pads by the estimated scale even under XSCALE/YSCALE, which
+        // clips a kernel stretched further than that at the window's edge
+        // (so tiles warped on their own differ there); pad for the given
+        // scale too.
+        if let Some([fx, fy]) = self.kernel_scale {
+            xscale = xscale.min(fx.max(1e-3));
+            yscale = yscale.min(fy.max(1e-3));
+        }
         let mut xr = if xscale < 0.95 {
             (r as f64 / xscale).ceil() as i32
         } else {
@@ -410,10 +441,13 @@ impl<'a> Planner<'a> {
     }
 }
 
-/// GDAL's kernel scale for a chunk (`PerformWarp`), including its
+/// GDAL 3.12's kernel scale for a chunk (`PerformWarp`), including its
 /// correction of an x scale far below the y scale from sampled local
-/// scales.
-fn chunk_scale(t: &Approx, c: &Chunk, method: Method) -> Scale {
+/// scales, or the scale given for every chunk.
+fn chunk_scale(t: &Approx, c: &Chunk, fixed: Option<[f64; 2]>) -> [f64; 2] {
+    if let Some(s) = fixed {
+        return s;
+    }
     let [dw, dh] = c.dst_size;
     let [mut xs, ys] = Scale::ratios(
         [dw as usize, dh as usize],
@@ -458,7 +492,7 @@ fn chunk_scale(t: &Approx, c: &Chunk, method: Method) -> Scale {
             }
         }
     }
-    Scale::new(method, xs, ys)
+    [xs, ys]
 }
 
 /// Types GDAL's warper resamples without masks when no nodata is set
@@ -515,7 +549,8 @@ pub(crate) fn warp_band<T: Sample>(
             ysize: sh,
             valid: valid.as_deref(),
         };
-        let mut kernel = Kernel::new(method, chunk_scale(t, c, method));
+        let [sx, sy] = c.scale;
+        let mut kernel = Kernel::new(method, Scale::new(method, sx, sy));
         let corner_fails = std::cell::OnceCell::new();
 
         let [dx0, dy0] = c.dst_off;
@@ -554,6 +589,55 @@ pub(crate) fn warp_band<T: Sample>(
                     v[dst] = true;
                 }
             }
+        }
+    }
+}
+
+/// One band of the chunked warp through rwarp: each chunk's source window
+/// and target cells go to one `warp` call, at the chunk's kernel scale.
+/// Arguments as [`warp_band`]'s; `out` is already filled with `nodata`
+/// (or zero), which is what rwarp writes where a cell gets no value.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn warp_band_rwarp<T: rwarp::warp::Sample>(
+    t: &Approx,
+    chunks: &[Chunk],
+    opts: &WarpOptions,
+    src: &[T],
+    region_off: [i32; 2],
+    region_size: [i32; 2],
+    out: &mut [T],
+    dst_width: usize,
+    nodata: Option<T>,
+) {
+    for c in chunks.iter().filter(|c| !c.is_empty()) {
+        let [sw, sh] = c.src_size.map(|v| v as usize);
+        let (rx, ry) = (
+            (c.src_off[0] - region_off[0]) as usize,
+            (c.src_off[1] - region_off[1]) as usize,
+        );
+        let mut data = Vec::with_capacity(sw * sh);
+        for row in 0..sh {
+            let start = (ry + row) * region_size[0] as usize + rx;
+            data.extend_from_slice(&src[start..start + sw]);
+        }
+        let buf = SourceBuffer {
+            data: &data,
+            ncol: sw,
+            nrow: sh,
+            nbands: 1,
+            col_off: c.src_off[0] as usize,
+            row_off: c.src_off[1] as usize,
+        };
+        let [x, y] = c.scale;
+        let [dx0, dy0] = c.dst_off.map(|v| v as usize);
+        let [cw, ch] = c.dst_size.map(|v| v as usize);
+        let mut o = opts.rwarp(KernelScaling::Fixed { x, y }, nodata);
+        o.dst_col_off = dx0;
+        o.dst_row_off = dy0;
+        let tile = rwarp::warp::warp(t, &buf, cw, ch, &o);
+        for (iy, row) in tile.chunks_exact(cw).enumerate() {
+            let at = (dy0 + iy) * dst_width + dx0;
+            out[at..at + cw].copy_from_slice(row);
         }
     }
 }

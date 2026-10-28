@@ -117,6 +117,22 @@ struct Warp {
     /// Resampling method.
     #[arg(long, short, value_enum, default_value_t = Resampling::Near)]
     resampling: Resampling,
+    /// With -r mode, the value kept when several cover the same area, as
+    /// gdalwarp's -wo MODE_TIES.
+    #[arg(long, value_enum, default_value_t = Ties::First)]
+    mode_ties: Ties,
+    /// With -r average or mode, intersect each target cell's outline
+    /// (each edge cut into N segments) exactly with the source cells
+    /// instead of GDAL's corner box: conservative remapping, in source
+    /// cell area. About 25 times slower.
+    #[arg(long, value_name = "N")]
+    exact_footprint: Option<usize>,
+    /// Kernel scale, target cells per source cell, for every chunk:
+    /// x y (gdalwarp's -wo XSCALE= -wo YSCALE=). Without it the scale is
+    /// estimated per chunk; give one to keep separately warped tiles
+    /// seamless.
+    #[arg(long, num_args = 2, value_names = ["X", "Y"])]
+    kernel_scale: Option<Vec<f64>>,
     /// Maximum error of the approximate transformer, in pixels; 0 is exact.
     #[arg(long, default_value_t = 0.125)]
     error_threshold: f64,
@@ -134,8 +150,9 @@ struct Warp {
     #[arg(long)]
     no_wrap: bool,
     /// Warp in one pass with a 1:1 kernel instead of chunk by chunk as
-    /// GDAL's warper does. Faster on large targets, but bilinear and cubic
-    /// then sample rather than smooth a target coarser than the source.
+    /// GDAL's warper does. Faster on large targets, but bilinear, cubic and
+    /// lanczos then sample rather than smooth a target coarser than the
+    /// source.
     #[arg(long)]
     plain: bool,
     /// Overview to read from a GeoTIFF with overviews, as gdalwarp's -ovr:
@@ -175,6 +192,9 @@ enum Resampling {
     Near,
     Bilinear,
     Cubic,
+    Lanczos,
+    Average,
+    Mode,
 }
 
 impl From<Resampling> for ResampleAlg {
@@ -183,6 +203,26 @@ impl From<Resampling> for ResampleAlg {
             Resampling::Near => ResampleAlg::NearestNeighbour,
             Resampling::Bilinear => ResampleAlg::Bilinear,
             Resampling::Cubic => ResampleAlg::Cubic,
+            Resampling::Lanczos => ResampleAlg::Lanczos,
+            Resampling::Average => ResampleAlg::Average,
+            Resampling::Mode => ResampleAlg::Mode,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Ties {
+    First,
+    Min,
+    Max,
+}
+
+impl From<Ties> for wxy_warp::ModeTies {
+    fn from(t: Ties) -> Self {
+        match t {
+            Ties::First => wxy_warp::ModeTies::First,
+            Ties::Min => wxy_warp::ModeTies::Min,
+            Ties::Max => wxy_warp::ModeTies::Max,
         }
     }
 }
@@ -677,8 +717,23 @@ async fn warp(w: Warp) -> Result<(), Failure> {
         return Err("--size must be positive".into());
     }
     let dst = GridSpec::from_extent(&w.crs, [e[0], e[2], e[1], e[3]], [s[0], s[1]]);
+    if w.kernel_scale.as_ref().is_some_and(|k| {
+        k.iter()
+            .any(|v| v.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater))
+    }) {
+        return Err("--kernel-scale must be positive".into());
+    }
+    if w.exact_footprint == Some(0) {
+        return Err("--exact-footprint must be at least 1".into());
+    }
     let opts = WarpOptions {
         resampling: w.resampling.into(),
+        footprint: match w.exact_footprint {
+            Some(densify) => wxy_warp::Footprint::Exact { densify },
+            None => wxy_warp::Footprint::Box,
+        },
+        mode_ties: w.mode_ties.into(),
+        kernel_scale: w.kernel_scale.as_ref().map(|k| [k[0], k[1]]),
         error_threshold: w.error_threshold,
         nodata: w.nodata,
         wrap_globe: !w.no_wrap,
