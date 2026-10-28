@@ -83,7 +83,95 @@ pub async fn open_url(url: &str, array: &str) -> Result<ZarrDataset> {
         )
         .build()
         .map_err(|e| Error::Fetch(format!("{url}: {e}")))?;
-    open_store(Arc::new(store), array).await
+    open_store(Arc::new(DeniedIsAbsent(store)), array).await
+}
+
+/// An object store in which a refused read means an absent key. A bucket
+/// that refuses listing (S3 without `s3:ListBucket`, such as the Copernicus
+/// Marine ARCO buckets) answers 403, not 404, for a key it does not hold,
+/// so a Zarr v3 `zarr.json` probe on a v2 store, or a chunk never written,
+/// reads as forbidden. GDAL reads such a 403 as absent too.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct DeniedIsAbsent<S>(S);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<S: std::fmt::Display> std::fmt::Display for DeniedIsAbsent<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn absent(e: object_store::Error) -> object_store::Error {
+    match e {
+        object_store::Error::PermissionDenied { path, source } => {
+            object_store::Error::NotFound { path, source }
+        }
+        e => e,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+impl<S: object_store::ObjectStore> object_store::ObjectStore for DeniedIsAbsent<S> {
+    async fn put_opts(
+        &self,
+        location: &object_store::path::Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.0.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &object_store::path::Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.0.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &object_store::path::Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.0.get_opts(location, options).await.map_err(absent)
+    }
+
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<
+            'static,
+            object_store::Result<object_store::path::Path>,
+        >,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>> {
+        self.0.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.0.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.0.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.0.copy_opts(from, to, options).await
+    }
 }
 
 /// Whether `source` names a Zarr hierarchy by URL: http(s), with a path

@@ -21,6 +21,7 @@ serde_json = "1"
 # https:// stores: Zarr read by plain GETs (native only; the browser has fetch)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 object_store = { workspace = true, features = ["http"] }
+futures.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
