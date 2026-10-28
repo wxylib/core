@@ -14,10 +14,9 @@ jobs:
         with:
           repository: wxylib/fixtures
           # Pinned, so a fixtures change moves core's oracles only when
-          # core says so. c3adea5: warp oracles from GDAL 3.12.4, which
-          # wxy-resample matches; fixtures 897661a regenerated them with
-          # GDAL 3.14.0dev (see the rwarp switch).
-          ref: c3adea57de88b76964125d7abf37329417d124e2
+          # core says so. 2fff59c: warp, curvilinear, cf and index oracles
+          # from GDAL 3.14.0dev-739fcf03bf (wxylib/fixtures#11).
+          ref: 2fff59c86899ae7ad2bead98d86f9b0ecfca5d27
           path: fixtures
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

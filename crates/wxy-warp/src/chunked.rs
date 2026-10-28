@@ -1,37 +1,27 @@
-//! The chunked warp: GDAL's warp operation, chunk by chunk, with the
-//! wxy-resample kernels (design doc 03, S5).
-//!
-//! Nearest, bilinear and cubic run wxy-resample's kernels (GDAL 3.12's);
-//! lanczos, average and mode run rwarp's `warp` on each chunk, with the
-//! chunk's source window and the kernel scale GDAL 3.12 gives the chunk.
+//! The chunked warp: GDAL's warp operation, chunk by chunk, with rwarp's
+//! kernels (design doc 03, S5). Each chunk's source window and target
+//! cells go to one `rwarp::warp::warp` call, at the kernel scale GDAL
+//! gives the chunk.
 //!
 //! GDAL splits the target into chunks (`CollectChunkList`), computes each
 //! chunk's source window (`ComputeSourceWindow`) and, from the window's
 //! size, how much to stretch the kernel (`PerformWarp`). The chunk
 //! boundaries matter to the output: they set the kernel scale, the window
 //! edges where kernels are clipped, and the scanline extents the
-//! approximate transformer interpolates over. This module ports those
-//! steps so the output matches GDAL's.
+//! approximate transformer interpolates over. This module ports the
+//! planning steps so the output matches GDAL's (3.14, the oracles'
+//! version); the kernels, including GDAL's source offset checks, are
+//! rwarp's.
 //!
 //! Not ported: GDAL's retry with `CHECK_WITH_INVERT_PROJ` when a window
 //! comes back with wild values (a PROJ behaviour the proj4rs backend has no
 //! switch for), destination alpha, cutlines and source masks other than
 //! nodata.
 
-use rwarp::warp::{KernelScaling, ResampleAlg, SourceBuffer};
+use rwarp::warp::{KernelScaling, SourceBuffer};
 use rwarp::Transformer;
-use wxy_resample::{write_density, Kernel, Method, Sample, Scale, Window, BAND_DENSITY_THRESHOLD};
 
-use crate::{Approx, WarpOptions};
-
-/// The kernels a chunked warp runs.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum ChunkKernel {
-    /// wxy-resample's port of GDAL 3.12's kernels.
-    Resample(Method),
-    /// rwarp's `warp`, one call per chunk.
-    Rwarp(ResampleAlg),
-}
+use crate::{Approx, ResampleAlg, WarpOptions};
 
 /// GDAL's `DEFAULT_STEP_COUNT`.
 const STEPS: usize = 21;
@@ -45,8 +35,6 @@ pub(crate) struct Chunk {
     pub dst_size: [i32; 2],
     pub src_off: [i32; 2],
     pub src_size: [i32; 2],
-    /// Kernel margin included in `src_size` (GDAL's `dfSrcXExtraSize`).
-    pub extra: [f64; 2],
     /// The kernel scale, target cells per source cell along x and y.
     pub scale: [f64; 2],
 }
@@ -61,14 +49,12 @@ impl Chunk {
 struct SourceWindow {
     off: [i32; 2],
     size: [i32; 2],
-    extra: [f64; 2],
     fill: f64,
 }
 
 const EMPTY: SourceWindow = SourceWindow {
     off: [0, 0],
     size: [0, 0],
-    extra: [0.0, 0.0],
     fill: 0.0,
 };
 
@@ -176,7 +162,6 @@ impl<'a> Planner<'a> {
             dst_size: size,
             src_off: w.off,
             src_size: w.size,
-            extra: w.extra,
             scale: [1.0, 1.0],
         });
     }
@@ -417,8 +402,6 @@ impl<'a> Planner<'a> {
         let min_yc = min_y.max(0.0) as i32;
         let max_xc = max_x.ceil().min(wf) as i32;
         let max_yc = max_y.ceil().min(hf) as i32;
-        let raw_x = ((w - min_xc) as f64).min(max_x - min_x).max(0.0);
-        let raw_y = ((h - min_yc) as f64).min(max_y - min_y).max(0.0);
 
         let axis = |min_c: i32, max_c: i32, n: i32, radius: i32| {
             if (max_c - min_c) as f64 > 0.9 * n as f64 {
@@ -435,170 +418,67 @@ impl<'a> Planner<'a> {
         SourceWindow {
             off: [xo, yo],
             size: [xs, ys],
-            extra: [xs as f64 - raw_x, ys as f64 - raw_y],
             fill,
         }
     }
 }
 
-/// GDAL 3.12's kernel scale for a chunk (`PerformWarp`), including its
-/// correction of an x scale far below the y scale from sampled local
-/// scales, or the scale given for every chunk.
+/// GDAL's kernel scale for a chunk (`GDALWarpKernel::PerformWarp`, GDAL
+/// 3.13 and later), or the scale given for every chunk. As GDAL does, the
+/// unit squares are sampled over `0..size` of the chunk without its
+/// offset, so every chunk is estimated at the target's top-left (rwarp's
+/// `estimate_scale` with no offset); the oracles need GDAL's answer.
 fn chunk_scale(t: &Approx, c: &Chunk, fixed: Option<[f64; 2]>) -> [f64; 2] {
     if let Some(s) = fixed {
         return s;
     }
-    let [dw, dh] = c.dst_size;
-    let [mut xs, ys] = Scale::ratios(
-        [dw as usize, dh as usize],
-        [c.src_size[0] as usize, c.src_size[1] as usize],
-        c.extra,
-    );
-    if ys / xs > 100.0 {
-        let (px, py) = (dw.min(10), dh.min(10));
-        let (mut x, mut y) = (Vec::new(), Vec::new());
-        for iy in 0..py {
-            for ix in 0..px {
-                // As GDAL: positions within the chunk, without its offset.
-                let fx = if px == 1 {
-                    0.0
-                } else {
-                    ix as f64 * dw as f64 / (px - 1) as f64
-                };
-                let fy = if py == 1 {
-                    0.0
-                } else {
-                    iy as f64 * dh as f64 / (py - 1) as f64
-                };
-                x.push(fx);
-                y.push(fy);
-                x.push(if ix == px - 1 { fx - 1.0 } else { fx + 1.0 });
-                y.push(fy);
-                x.push(fx);
-                y.push(if iy == py - 1 { fy - 1.0 } else { fy + 1.0 });
-            }
-        }
-        let ok = t.transform(true, &mut x, &mut y);
-        let mut scales: Vec<f64> = (0..x.len())
-            .step_by(3)
-            .filter(|&i| ok[i] && ok[i + 1] && ok[i + 2])
-            .map(|i| 1.0 / (x[i + 1] - x[i]).abs().max((x[i + 2] - x[i]).abs()))
-            .collect();
-        scales.sort_by(|a, b| a.total_cmp(b));
-        if let Some(&max) = scales.last() {
-            let kept: Vec<f64> = scales.into_iter().filter(|&s| s > max / 10.0).collect();
-            if !kept.is_empty() {
-                xs = kept.iter().sum::<f64>() / kept.len() as f64;
-            }
-        }
-    }
-    [xs, ys]
+    let [w, h] = c.dst_size.map(|v| v as usize);
+    let (x, y) = rwarp::warp::estimate_scale(t, w, h, 0, 0);
+    [x, y]
 }
 
-/// Types GDAL's warper resamples without masks when no nodata is set
-/// (its specialised `NoMasksOrDstDensityOnly` kernels); every other type
-/// goes through its general real-valued path.
-fn has_plain_path<T: Sample>() -> bool {
-    use std::any::TypeId;
-    let t = TypeId::of::<T>();
-    t == TypeId::of::<u8>()
-        || t == TypeId::of::<i16>()
-        || t == TypeId::of::<u16>()
-        || t == TypeId::of::<f32>()
+/// GDAL's retry in `GWKCheckAndComputeSrcOffsets`: a cell centre that the
+/// approximate transformer puts less than one source cell outside the
+/// chunk's window is transformed again on its own, which is exact. rwarp
+/// uses the transformer it is given, so the retry wraps it here, where the
+/// window is known.
+struct Retry<'a> {
+    t: &'a Approx,
+    off: [f64; 2],
+    size: [f64; 2],
+}
+
+impl Transformer for Retry<'_> {
+    fn transform(&self, dst_to_src: bool, x: &mut [f64], y: &mut [f64]) -> Vec<bool> {
+        let (x0, y0) = (x.to_vec(), y.to_vec());
+        let mut ok = self.t.transform(dst_to_src, x, y);
+        if !dst_to_src {
+            return ok;
+        }
+        // just outside [off, off + size), as GDAL tests each side
+        let near = |v: f64, o: f64, n: f64| {
+            (v < o && v > o - 1.0) || (v + 1e-10 > o + n && v < o + n + 1.0)
+        };
+        for i in 0..ok.len() {
+            if ok[i]
+                && (near(x[i], self.off[0], self.size[0]) || near(y[i], self.off[1], self.size[1]))
+            {
+                let (mut a, mut b) = ([x0[i]], [y0[i]]);
+                ok[i] = self.t.transform(true, &mut a, &mut b)[0];
+                x[i] = a[0];
+                y[i] = b[0];
+            }
+        }
+        ok
+    }
 }
 
 /// One band of the chunked warp. `src` is the source region
 /// `region_off`/`region_size` (covering every chunk's window); `out` is
-/// the whole target, already filled with nodata (or zero).
+/// the whole target, already filled with `nodata` (or zero), which is
+/// what rwarp writes where a cell gets no value.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn warp_band<T: Sample>(
-    t: &Approx,
-    chunks: &[Chunk],
-    method: Method,
-    src: &[T],
-    region_off: [i32; 2],
-    region_size: [i32; 2],
-    out: &mut [T],
-    dst_width: usize,
-    nodata: Option<f64>,
-) {
-    let masked = nodata.is_some() || !has_plain_path::<T>();
-    // GDAL's target validity mask: the target starts as nodata, so every
-    // cell is invalid until written.
-    let mut dst_valid: Option<Vec<bool>> = nodata.map(|_| vec![false; out.len()]);
-    let nd_src = nodata.and_then(T::from_nodata);
-
-    for c in chunks.iter().filter(|c| !c.is_empty()) {
-        let [sw, sh] = c.src_size.map(|v| v as usize);
-        let (rx, ry) = (
-            (c.src_off[0] - region_off[0]) as usize,
-            (c.src_off[1] - region_off[1]) as usize,
-        );
-        let mut data = Vec::with_capacity(sw * sh);
-        for row in 0..sh {
-            let start = (ry + row) * region_size[0] as usize + rx;
-            data.extend_from_slice(&src[start..start + sw]);
-        }
-        let valid: Option<Vec<bool>> = nd_src.and_then(|nd| {
-            let v: Vec<bool> = data.iter().map(|&x| !x.is_nodata(nd)).collect();
-            (!v.iter().all(|&b| b)).then_some(v)
-        });
-        let win = Window {
-            data: &data,
-            xsize: sw,
-            ysize: sh,
-            valid: valid.as_deref(),
-        };
-        let [sx, sy] = c.scale;
-        let mut kernel = Kernel::new(method, Scale::new(method, sx, sy));
-        let corner_fails = std::cell::OnceCell::new();
-
-        let [dx0, dy0] = c.dst_off;
-        let [cw, ch] = c.dst_size;
-        let (sx0, sy0) = (c.src_off[0] as f64, c.src_off[1] as f64);
-        for iy in 0..ch {
-            let fy = iy as f64 + 0.5 + dy0 as f64;
-            let mut xs: Vec<f64> = (0..cw).map(|ix| ix as f64 + 0.5 + dx0 as f64).collect();
-            let mut ys = vec![fy; cw as usize];
-            let mut ok = t.transform(true, &mut xs, &mut ys);
-            for ix in 0..cw as usize {
-                let Some(mut off) = src_offset(t, c, ix, fy, &mut xs, &mut ys, &mut ok) else {
-                    continue;
-                };
-                let (x, y) = (xs[ix] - sx0, ys[ix] - sy0);
-                let dst = (dy0 as usize + iy as usize) * dst_width + dx0 as usize + ix;
-                if !masked {
-                    out[dst] = kernel.value(&win, off, x, y);
-                    continue;
-                }
-                if !win.is_valid(off) {
-                    if !*corner_fails.get_or_init(|| one_corner_fails(t, c)) {
-                        continue;
-                    }
-                    match adjust_on_edge(t, c, &win, off) {
-                        Some(o) => off = o,
-                        None => continue,
-                    }
-                }
-                let (density, real) = kernel.density(&win, off, x, y);
-                if density < BAND_DENSITY_THRESHOLD {
-                    continue;
-                }
-                write_density(out, dst_valid.as_deref(), dst, density, real, nodata);
-                if let Some(v) = dst_valid.as_mut() {
-                    v[dst] = true;
-                }
-            }
-        }
-    }
-}
-
-/// One band of the chunked warp through rwarp: each chunk's source window
-/// and target cells go to one `warp` call, at the chunk's kernel scale.
-/// Arguments as [`warp_band`]'s; `out` is already filled with `nodata`
-/// (or zero), which is what rwarp writes where a cell gets no value.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn warp_band_rwarp<T: rwarp::warp::Sample>(
+pub(crate) fn warp_band<T: rwarp::warp::Sample>(
     t: &Approx,
     chunks: &[Chunk],
     opts: &WarpOptions,
@@ -634,115 +514,21 @@ pub(crate) fn warp_band_rwarp<T: rwarp::warp::Sample>(
         let mut o = opts.rwarp(KernelScaling::Fixed { x, y }, nodata);
         o.dst_col_off = dx0;
         o.dst_row_off = dy0;
-        let tile = rwarp::warp::warp(t, &buf, cw, ch, &o);
+        let tile = match opts.resampling {
+            // footprints from cell corners, which GDAL does not retry
+            ResampleAlg::Average | ResampleAlg::Mode => rwarp::warp::warp(t, &buf, cw, ch, &o),
+            _ => {
+                let retry = Retry {
+                    t,
+                    off: c.src_off.map(f64::from),
+                    size: c.src_size.map(f64::from),
+                };
+                rwarp::warp::warp(&retry, &buf, cw, ch, &o)
+            }
+        };
         for (iy, row) in tile.chunks_exact(cw).enumerate() {
             let at = (dy0 + iy) * dst_width + dx0;
             out[at..at + cw].copy_from_slice(row);
         }
-    }
-}
-
-/// GDAL's `GWKCheckAndComputeSrcOffsets`: the source cell (offset in the
-/// chunk window) for target column `ix`, retrying a position just outside
-/// the window with the exact transformer.
-fn src_offset(
-    t: &Approx,
-    c: &Chunk,
-    ix: usize,
-    fy: f64,
-    xs: &mut [f64],
-    ys: &mut [f64],
-    ok: &mut [bool],
-) -> Option<usize> {
-    let (ox, oy) = (c.src_off[0] as f64, c.src_off[1] as f64);
-    let (w, h) = (c.src_size[0] as f64, c.src_size[1] as f64);
-    for attempt in 0..2 {
-        if attempt == 1 {
-            let mut px = [ix as f64 + 0.5 + c.dst_off[0] as f64];
-            let mut py = [fy];
-            ok[ix] = t.transform(true, &mut px, &mut py)[0];
-            xs[ix] = px[0];
-            ys[ix] = py[0];
-        }
-        if !ok[ix] || xs[ix].is_nan() || ys[ix].is_nan() {
-            return None;
-        }
-        let (x, y) = (xs[ix], ys[ix]);
-        let retry = attempt == 0;
-        if x < ox {
-            if retry && x > ox - 1.0 {
-                continue;
-            }
-            return None;
-        }
-        if y < oy {
-            if retry && y > oy - 1.0 {
-                continue;
-            }
-            return None;
-        }
-        if x + 1e-10 > w + ox {
-            if retry && x < w + ox + 1.0 {
-                continue;
-            }
-            return None;
-        }
-        if y + 1e-10 > h + oy {
-            if retry && y < h + oy + 1.0 {
-                continue;
-            }
-            return None;
-        }
-        break;
-    }
-    let (sw, sh) = (c.src_size[0], c.src_size[1]);
-    let mut cx = (xs[ix] + 1e-10) as i32 - c.src_off[0];
-    let mut cy = (ys[ix] + 1e-10) as i32 - c.src_off[1];
-    if cx == sw {
-        cx -= 1;
-    }
-    if cy == sh {
-        cy -= 1;
-    }
-    Some(cx as usize + cy as usize * sw as usize)
-}
-
-/// GDAL's `GWKOneSourceCornerFailsToReproject`.
-fn one_corner_fails(t: &Approx, c: &Chunk) -> bool {
-    for iy in 0..=1 {
-        for ix in 0..=1 {
-            let mut x = [(c.src_off[0] + ix * c.src_size[0]) as f64];
-            let mut y = [(c.src_off[1] + iy * c.src_size[1]) as f64];
-            if !t.transform(false, &mut x, &mut y)[0] {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// GDAL's `GWKAdjustSrcOffsetOnEdge`: at the edge of the projection's
-/// domain, use a valid neighbour of an invalid source cell.
-fn adjust_on_edge<T: Sample>(t: &Approx, c: &Chunk, win: &Window<T>, off: usize) -> Option<usize> {
-    let w = win.xsize;
-    let (cx, cy) = (off % w, off / w);
-    let fwd = |dx: usize, dy: usize| {
-        let mut x = [(c.src_off[0] as usize + cx + dx) as f64];
-        let mut y = [(c.src_off[1] as usize + cy + dy) as f64];
-        t.transform(false, &mut x, &mut y)[0]
-    };
-    if fwd(0, 0) && fwd(0, 1) && fwd(1, 0) {
-        return None;
-    }
-    if cx + 1 < w && win.is_valid(off + 1) {
-        Some(off + 1)
-    } else if cy + 1 < win.ysize && win.is_valid(off + w) {
-        Some(off + w)
-    } else if cx > 0 && win.is_valid(off - 1) {
-        Some(off - 1)
-    } else if cy > 0 && win.is_valid(off - w) {
-        Some(off - w)
-    } else {
-        None
     }
 }
