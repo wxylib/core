@@ -12,15 +12,16 @@ categories = ["science::geo"]
 wxy-domain.workspace = true
 wxy-source.workspace = true
 # rwarp is external (design doc 03, A2). Pinned to the repository until a
-# release carries the proj4rs backend and the generic kernel (crates.io
-# 0.1.1 predates both).
+# release carries the proj4rs backend and the 0.2 kernels (warp() with
+# WarpOptions, average and mode; hypertidy/rwarp#3); crates.io 0.1.1
+# predates them.
 wxy-resample.workspace = true
 # exact cell coverage of polygons (exactextract's algorithm), sparse
 controlledburn = "0.2.1"
 # plans and options as values (EXPLAIN, dry runs, bindings)
 serde.workspace = true
 proj4rs = { version = "0.1.10", default-features = false, features = ["crs-definitions"] }
-rwarp = { git = "https://github.com/hypertidy/rwarp", rev = "20572c396307f71659508eda0411ee31e9d127c8", default-features = false, features = ["proj4rs"] }
+rwarp = { git = "https://github.com/hypertidy/rwarp", rev = "4f1ab196e3e270626e4fcc649444b9dfe87de59e", default-features = false, features = ["proj4rs"] }
 
 [dev-dependencies]
 async-trait.workspace = true

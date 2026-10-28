@@ -11,12 +11,13 @@
 //!    virtual Zarr);
 //! 3. **warp**: resample with rwarp's kernel, one slice (band) at a time.
 //!
-//! By default (stage S5, [`WarpOptions::chunked`]) nearest, bilinear and
-//! cubic warps run as GDAL's warp operation does instead: chunk by chunk,
-//! with the source windows, kernel scales and kernels of GDAL's warper
-//! (wxy-resample), so that a target coarser than the source is smoothed as
-//! GDAL smooths it and the output matches GDAL's cell for cell. The steps
-//! above remain as the plain route.
+//! By default (stage S5, [`WarpOptions::chunked`]) warps run as GDAL's
+//! warp operation does instead: chunk by chunk, with the source windows
+//! and kernel scales of GDAL's warper, so that a target coarser than the
+//! source is smoothed as GDAL smooths it. Nearest, bilinear and cubic use
+//! wxy-resample's kernels and match GDAL 3.12 cell for cell; lanczos,
+//! average and mode use rwarp's kernels on each chunk. The steps above
+//! remain as the plain route.
 //!
 //! Any dims before y and x (time, depth, band) are leading dims (stage
 //! S4b): [`WarpPlan`] plans once from the spatial dims and warps the
@@ -34,8 +35,8 @@
 use rwarp::approx::ApproxTransformer;
 use rwarp::source_window::{build_source_grid, compute_source_window, SourceWindow};
 use rwarp::transform::GenImgProjTransformer;
-use rwarp::warp::warp_resample_t;
 pub use rwarp::warp::ResampleAlg;
+use rwarp::warp::{KernelScaling, SourceBuffer};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -86,9 +87,21 @@ impl GridSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WarpOptions {
-    /// GDAL's `-r` names: near, bilinear, cubic, lanczos.
+    /// GDAL's `-r` names: near, bilinear, cubic, lanczos, average, mode.
     #[serde(with = "resample_alg")]
     pub resampling: ResampleAlg,
+    /// How `average` and `mode` measure a target cell's overlap with
+    /// source cells.
+    pub footprint: Footprint,
+    /// Which value `mode` keeps when several cover the same area
+    /// (gdalwarp's `-wo MODE_TIES`).
+    pub mode_ties: ModeTies,
+    /// The kernel scale, target cells per source cell along x and y, for
+    /// every chunk (gdalwarp's `-wo XSCALE= -wo YSCALE=`). `None`
+    /// estimates it per chunk as GDAL does, so separate warps of
+    /// neighbouring tiles can stretch their kernels differently; one scale
+    /// for all of them keeps the tiles seamless.
+    pub kernel_scale: Option<[f64; 2]>,
     /// Maximum error, in pixels, of the approximate transformer. `0`
     /// transforms every pixel exactly.
     pub error_threshold: f64,
@@ -102,9 +115,9 @@ pub struct WarpOptions {
     pub wrap_globe: bool,
     /// Warp as GDAL's warper does (`true`, the default): chunk by chunk,
     /// each chunk's kernel stretched to the source cells a target cell
-    /// covers. `false` warps in one pass with rwarp's kernel at 1:1, which
-    /// samples rather than smooths a coarser target (bilinear and cubic
-    /// then differ from GDAL there).
+    /// covers. `false` warps in one pass with rwarp's kernel at 1:1 (or at
+    /// `kernel_scale`), which samples rather than smooths a coarser target
+    /// (the interpolating kernels then differ from GDAL there).
     pub chunked: bool,
     /// Which resolution level [`warp_pyramid`] reads (gdalwarp's `-ovr`).
     /// [`warp`] reads the one source it is given.
@@ -112,6 +125,56 @@ pub struct WarpOptions {
     /// Working memory, in bytes, one chunk of the chunked warp may take
     /// before GDAL's planner splits it (gdalwarp's `-wm`; 64 MiB).
     pub memory_limit: f64,
+}
+
+/// How `average` and `mode` measure overlap, in source cell space (planar
+/// in the source CRS, not ellipsoidal area).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Footprint {
+    /// GDAL's: the box between the transformed corners of the target cell.
+    #[default]
+    Box,
+    /// The target cell's outline, each edge cut into `densify` segments,
+    /// intersected exactly with the source cells: first-order conservative
+    /// remapping. No antimeridian handling.
+    Exact { densify: usize },
+}
+
+/// Tie-breaking for `mode`, as gdalwarp's `-wo MODE_TIES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModeTies {
+    /// The value that reached the winning count first, in scan order.
+    #[default]
+    First,
+    Min,
+    Max,
+}
+
+impl WarpOptions {
+    /// rwarp's options for one call, with `scaling` and the given nodata.
+    fn rwarp<T: rwarp::warp::Sample>(
+        &self,
+        scaling: KernelScaling,
+        nodata: Option<T>,
+    ) -> rwarp::warp::WarpOptions<T> {
+        rwarp::warp::WarpOptions {
+            alg: self.resampling,
+            scaling,
+            footprint: match self.footprint {
+                Footprint::Box => rwarp::warp::Footprint::GdalBox,
+                Footprint::Exact { densify } => rwarp::warp::Footprint::Exact { densify },
+            },
+            mode_ties: match self.mode_ties {
+                ModeTies::First => rwarp::warp::ModeTies::First,
+                ModeTies::Min => rwarp::warp::ModeTies::Min,
+                ModeTies::Max => rwarp::warp::ModeTies::Max,
+            },
+            nodata,
+            ..Default::default()
+        }
+    }
 }
 
 /// Overview choice for [`warp_pyramid`], as gdalwarp's `-ovr`.
@@ -141,6 +204,8 @@ mod resample_alg {
             ResampleAlg::Bilinear => "bilinear",
             ResampleAlg::Cubic => "cubic",
             ResampleAlg::Lanczos => "lanczos",
+            ResampleAlg::Average => "average",
+            ResampleAlg::Mode => "mode",
         })
     }
 
@@ -151,9 +216,11 @@ mod resample_alg {
             "bilinear" => ResampleAlg::Bilinear,
             "cubic" => ResampleAlg::Cubic,
             "lanczos" => ResampleAlg::Lanczos,
+            "average" => ResampleAlg::Average,
+            "mode" => ResampleAlg::Mode,
             _ => {
                 return Err(serde::de::Error::custom(format!(
-                    "resampling {s:?}: use near, bilinear, cubic or lanczos"
+                    "resampling {s:?}: use near, bilinear, cubic, lanczos, average or mode"
                 )))
             }
         })
@@ -164,6 +231,9 @@ impl Default for WarpOptions {
     fn default() -> Self {
         Self {
             resampling: ResampleAlg::NearestNeighbour,
+            footprint: Footprint::Box,
+            mode_ties: ModeTies::First,
+            kernel_scale: None,
             error_threshold: 0.125,
             nodata: None,
             wrap_globe: true,
@@ -294,22 +364,16 @@ impl SourceGrid {
     }
 }
 
-/// rwarp's approximate transformer, with two shims for rwarp issues found
-/// against GDAL here (fixes are with rwarp's author; remove these when a
-/// release carries them):
-///
-/// - a subdivided scanline can leave one point untransformed and marked
-///   failed; such points are transformed exactly, as GDAL does;
-/// - its nearest kernel truncates source indices towards zero, so a point
-///   at `-1 < x < 0` reads column 0; with `nearest`, points left of or
-///   above the source are moved to -2 (still outside after truncation),
-///   which is what GDAL's floor gives.
+/// rwarp's approximate transformer, with a shim for an rwarp issue found
+/// against GDAL here (the fix is with rwarp's author; remove this when a
+/// release carries it): a subdivided scanline can leave one point
+/// untransformed and marked failed; such points are transformed exactly,
+/// as GDAL does.
 struct Approx {
     /// `None` when the error threshold is 0: every point exact, as GDAL
     /// does without its approximate transformer.
     approx: Option<ApproxTransformer<Globe>>,
     exact: Globe,
-    nearest: bool,
     /// The same wrap, applied again after interpolation: for a -180..180
     /// source, the only wrap, catching points just past its edge.
     globe: Option<(f64, Option<f64>)>,
@@ -370,19 +434,12 @@ impl rwarp::Transformer for Approx {
         if dst_to_src {
             wrap(self.globe, x, y, &ok);
         }
-        if self.nearest && dst_to_src {
-            for v in x.iter_mut().chain(y.iter_mut()) {
-                if *v < 0.0 && *v > -1.0 {
-                    *v = -2.0;
-                }
-            }
-        }
         ok
     }
 }
 
 fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<Approx> {
-    let (threshold, alg) = (opts.error_threshold, opts.resampling);
+    let threshold = opts.error_threshold;
     let globe = if opts.wrap_globe { src.globe()? } else { None };
     let west =
         src.geotransform[0].min(src.geotransform[0] + src.geotransform[1] * src.size()[0] as f64);
@@ -432,9 +489,6 @@ fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<A
             None
         },
         exact: make()?,
-        // The chunked warp checks source offsets as GDAL does and needs
-        // the positions as they are.
-        nearest: alg == ResampleAlg::NearestNeighbour && !opts.chunked,
         globe,
     })
 }
@@ -620,7 +674,7 @@ enum Route {
     Empty,
     /// GDAL's chunked warp (S5), over source region `(offset, size)`.
     Chunked {
-        method: wxy_resample::Method,
+        kernel: chunked::ChunkKernel,
         chunks: Vec<chunked::Chunk>,
         region: ([i32; 2], [i32; 2]),
     },
@@ -639,8 +693,12 @@ impl WarpPlan {
     ) -> Result<Self> {
         let src = SourceGrid::from_domain(domain)?;
         let nodata = opts.nodata.or(nodata);
-        let route = match method(opts.resampling).filter(|_| opts.chunked) {
-            Some(method) => {
+        let route = match opts.chunked {
+            true => {
+                let kernel = match method(opts.resampling) {
+                    Some(m) => chunked::ChunkKernel::Resample(m),
+                    None => chunked::ChunkKernel::Rwarp(opts.resampling),
+                };
                 let bits = 8 * dtype
                     .size()
                     .ok_or_else(|| Error::Unsupported(format!("warping {dtype:?}")))?;
@@ -650,7 +708,7 @@ impl WarpPlan {
                     &t,
                     src.size(),
                     [dst.size[0] as i32, dst.size[1] as i32],
-                    method,
+                    opts.resampling.radius(),
                     special,
                     src.globe()?,
                     bits,
@@ -658,6 +716,7 @@ impl WarpPlan {
                     src.geoloc.is_none(),
                 );
                 planner.memory_limit = opts.memory_limit;
+                planner.kernel_scale = opts.kernel_scale;
                 let chunks = planner.chunks();
                 let live: Vec<&chunked::Chunk> = chunks.iter().filter(|c| !c.is_empty()).collect();
                 if live.is_empty() {
@@ -674,13 +733,13 @@ impl WarpPlan {
                     let region = ([x0, y0], [hi(0) - x0, hi(1) - y0]);
                     drop(live);
                     Route::Chunked {
-                        method,
+                        kernel,
                         chunks,
                         region,
                     }
                 }
             }
-            None => match plan(&src, dst, opts)? {
+            false => match plan(&src, dst, opts)? {
                 Some(w) => Route::Plain(w),
                 None => Route::Empty,
             },
@@ -817,7 +876,11 @@ impl WarpPlan {
         let b = n_slices;
         let values = match &self.route {
             Route::Empty => unreachable!("an empty route has no region"),
-            Route::Chunked { method, chunks, .. } => {
+            Route::Chunked {
+                kernel: chunked::ChunkKernel::Resample(method),
+                chunks,
+                ..
+            } => {
                 let origin = [x0 as i32, y0 as i32];
                 let extent = [xs as i32, ys as i32];
                 macro_rules! run {
@@ -853,6 +916,47 @@ impl WarpPlan {
                     Values::F64(v) => run!(v, F64, f64),
                 }
             }
+            Route::Chunked {
+                kernel: chunked::ChunkKernel::Rwarp(_),
+                chunks,
+                ..
+            } => {
+                let origin = [x0 as i32, y0 as i32];
+                let extent = [xs as i32, ys as i32];
+                macro_rules! run {
+                    ($v:expr, $variant:ident, $t:ty) => {{
+                        let nd = nodata.map(|n| n as $t);
+                        let mut out = vec![nd.unwrap_or(0 as $t); b * n_dst];
+                        for k in 0..b {
+                            chunked::warp_band_rwarp::<$t>(
+                                &t,
+                                chunks,
+                                &self.opts,
+                                &$v[k * n_src..(k + 1) * n_src],
+                                origin,
+                                extent,
+                                &mut out[k * n_dst..(k + 1) * n_dst],
+                                ncol,
+                                nd,
+                            );
+                        }
+                        Values::$variant(out)
+                    }};
+                }
+                match &buf.values {
+                    Values::U8(v) => run!(v, U8, u8),
+                    Values::I8(v) => run!(v, I8, i8),
+                    Values::U16(v) => run!(v, U16, u16),
+                    Values::I16(v) => run!(v, I16, i16),
+                    Values::U32(v) => run!(v, U32, u32),
+                    Values::I32(v) => run!(v, I32, i32),
+                    Values::F32(v) => run!(v, F32, f32),
+                    Values::F64(v) => run!(v, F64, f64),
+                    Values::U64(_) | Values::I64(_) => {
+                        return Err(Error::Unsupported("warping 64-bit integers".into()))
+                    }
+                }
+            }
             Route::Plain(_) => {
                 let (xs, ys) = (xs as usize, ys as usize);
                 macro_rules! run {
@@ -860,20 +964,16 @@ impl WarpPlan {
                         let nd = nodata.map(|n| n as $t);
                         let mut out = Vec::with_capacity(b * n_dst);
                         for k in 0..b {
-                            out.extend(warp_resample_t::<$t>(
-                                &t,
-                                &$v[k * n_src..(k + 1) * n_src],
-                                xs,
-                                ys,
-                                1,
-                                x0 as usize,
-                                y0 as usize,
-                                ncol,
-                                nrow,
-                                nd,
-                                None,
-                                self.opts.resampling,
-                            ));
+                            let src = SourceBuffer {
+                                data: &$v[k * n_src..(k + 1) * n_src],
+                                ncol: xs,
+                                nrow: ys,
+                                nbands: 1,
+                                col_off: x0 as usize,
+                                row_off: y0 as usize,
+                            };
+                            let o = self.opts.rwarp(plain_scaling(&self.opts), nd);
+                            out.extend(rwarp::warp::warp(&t, &src, ncol, nrow, &o));
                         }
                         Values::$variant(out)
                     }};
@@ -999,6 +1099,18 @@ pub async fn warp_pyramid<S: ChunkSource>(
         .collect();
     let k = choose_overview(&domains[0], &widths, dst, opts)?.map_or(0, |k| k + 1);
     warp(&levels[k], &domains[k], dst, opts, nodata).await
+}
+
+/// The plain route's kernel scale: rwarp's at 1:1 unless one is given.
+/// Average and mode have no kernel to stretch; the scale only sets how far
+/// past the source window a target cell's footprint may reach, so theirs
+/// is estimated.
+fn plain_scaling(opts: &WarpOptions) -> KernelScaling {
+    match (opts.kernel_scale, opts.resampling) {
+        (Some([x, y]), _) => KernelScaling::Fixed { x, y },
+        (None, ResampleAlg::Average | ResampleAlg::Mode) => KernelScaling::WidenWhenDownsampling,
+        (None, _) => KernelScaling::Point,
+    }
 }
 
 fn method(alg: ResampleAlg) -> Option<wxy_resample::Method> {

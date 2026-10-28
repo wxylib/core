@@ -26,6 +26,9 @@ fn alg(name: &str) -> ResampleAlg {
         "near" => ResampleAlg::NearestNeighbour,
         "bilinear" => ResampleAlg::Bilinear,
         "cubic" => ResampleAlg::Cubic,
+        "lanczos" => ResampleAlg::Lanczos,
+        "average" => ResampleAlg::Average,
+        "mode" => ResampleAlg::Mode,
         o => panic!("unknown resampling {o}"),
     }
 }
