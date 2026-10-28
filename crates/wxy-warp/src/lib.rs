@@ -156,7 +156,7 @@ impl WarpOptions {
         &self,
         scaling: KernelScaling,
         nodata: Option<T>,
-    ) -> rwarp::warp::WarpOptions<T> {
+    ) -> rwarp::warp::WarpOptions {
         rwarp::warp::WarpOptions {
             alg: self.resampling,
             scaling,
@@ -169,7 +169,9 @@ impl WarpOptions {
                 ModeTies::Min => rwarp::warp::ModeTies::Min,
                 ModeTies::Max => rwarp::warp::ModeTies::Max,
             },
-            nodata,
+            src_nodata: nodata.map_or(rwarp::warp::Nodata::None, |v| {
+                rwarp::warp::Nodata::Value(v.to_f64())
+            }),
             ..Default::default()
         }
     }
@@ -204,6 +206,13 @@ mod resample_alg {
             ResampleAlg::Lanczos => "lanczos",
             ResampleAlg::Average => "average",
             ResampleAlg::Mode => "mode",
+            ResampleAlg::CubicSpline => "cubicspline",
+            ResampleAlg::Min => "min",
+            ResampleAlg::Max => "max",
+            ResampleAlg::Med => "med",
+            ResampleAlg::Q1 => "q1",
+            ResampleAlg::Q3 => "q3",
+            ResampleAlg::Rms => "rms",
         })
     }
 
@@ -216,9 +225,16 @@ mod resample_alg {
             "lanczos" => ResampleAlg::Lanczos,
             "average" => ResampleAlg::Average,
             "mode" => ResampleAlg::Mode,
+            "cubicspline" => ResampleAlg::CubicSpline,
+            "min" => ResampleAlg::Min,
+            "max" => ResampleAlg::Max,
+            "med" => ResampleAlg::Med,
+            "q1" => ResampleAlg::Q1,
+            "q3" => ResampleAlg::Q3,
+            "rms" => ResampleAlg::Rms,
             _ => {
                 return Err(serde::de::Error::custom(format!(
-                    "resampling {s:?}: use near, bilinear, cubic, lanczos, average or mode"
+                    "resampling {s:?}: use near, bilinear, cubic, cubicspline, lanczos, average, mode, min, max, med, q1, q3 or rms"
                 )))
             }
         })
@@ -1046,6 +1062,23 @@ pub async fn warp_pyramid<S: ChunkSource>(
     warp(&levels[k], &domains[k], dst, opts, nodata).await
 }
 
+/// Methods that reduce the source cells under each target cell's footprint
+/// (average, mode and the order statistics) rather than interpolate at its
+/// centre.
+pub(crate) fn footprint_method(alg: ResampleAlg) -> bool {
+    matches!(
+        alg,
+        ResampleAlg::Average
+            | ResampleAlg::Mode
+            | ResampleAlg::Min
+            | ResampleAlg::Max
+            | ResampleAlg::Med
+            | ResampleAlg::Q1
+            | ResampleAlg::Q3
+            | ResampleAlg::Rms
+    )
+}
+
 /// The plain route's kernel scale: rwarp's at 1:1 unless one is given.
 /// Average and mode have no kernel to stretch; the scale only sets how far
 /// past the source window a target cell's footprint may reach, so theirs
@@ -1053,7 +1086,7 @@ pub async fn warp_pyramid<S: ChunkSource>(
 fn plain_scaling(opts: &WarpOptions) -> KernelScaling {
     match (opts.kernel_scale, opts.resampling) {
         (Some([x, y]), _) => KernelScaling::Fixed { x, y },
-        (None, ResampleAlg::Average | ResampleAlg::Mode) => KernelScaling::WidenWhenDownsampling,
+        (None, alg) if footprint_method(alg) => KernelScaling::WidenWhenDownsampling,
         (None, _) => KernelScaling::Point,
     }
 }
