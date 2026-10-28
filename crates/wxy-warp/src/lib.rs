@@ -14,10 +14,8 @@
 //! By default (stage S5, [`WarpOptions::chunked`]) warps run as GDAL's
 //! warp operation does instead: chunk by chunk, with the source windows
 //! and kernel scales of GDAL's warper, so that a target coarser than the
-//! source is smoothed as GDAL smooths it. Nearest, bilinear and cubic use
-//! wxy-resample's kernels and match GDAL 3.12 cell for cell; lanczos,
-//! average and mode use rwarp's kernels on each chunk. The steps above
-//! remain as the plain route.
+//! source is smoothed as GDAL smooths it, with rwarp's kernels on each
+//! chunk. The steps above remain as the plain route.
 //!
 //! Any dims before y and x (time, depth, band) are leading dims (stage
 //! S4b): [`WarpPlan`] plans once from the spatial dims and warps the
@@ -674,7 +672,6 @@ enum Route {
     Empty,
     /// GDAL's chunked warp (S5), over source region `(offset, size)`.
     Chunked {
-        kernel: chunked::ChunkKernel,
         chunks: Vec<chunked::Chunk>,
         region: ([i32; 2], [i32; 2]),
     },
@@ -695,10 +692,6 @@ impl WarpPlan {
         let nodata = opts.nodata.or(nodata);
         let route = match opts.chunked {
             true => {
-                let kernel = match method(opts.resampling) {
-                    Some(m) => chunked::ChunkKernel::Resample(m),
-                    None => chunked::ChunkKernel::Rwarp(opts.resampling),
-                };
                 let bits = 8 * dtype
                     .size()
                     .ok_or_else(|| Error::Unsupported(format!("warping {dtype:?}")))?;
@@ -732,11 +725,7 @@ impl WarpPlan {
                     let (x0, y0) = (lo(0), lo(1));
                     let region = ([x0, y0], [hi(0) - x0, hi(1) - y0]);
                     drop(live);
-                    Route::Chunked {
-                        kernel,
-                        chunks,
-                        region,
-                    }
+                    Route::Chunked { chunks, region }
                 }
             }
             false => match plan(&src, dst, opts)? {
@@ -876,51 +865,7 @@ impl WarpPlan {
         let b = n_slices;
         let values = match &self.route {
             Route::Empty => unreachable!("an empty route has no region"),
-            Route::Chunked {
-                kernel: chunked::ChunkKernel::Resample(method),
-                chunks,
-                ..
-            } => {
-                let origin = [x0 as i32, y0 as i32];
-                let extent = [xs as i32, ys as i32];
-                macro_rules! run {
-                    ($v:expr, $variant:ident, $t:ty) => {{
-                        let init = nodata.map(|n| n as $t).unwrap_or_default();
-                        let mut out = vec![init; b * n_dst];
-                        for k in 0..b {
-                            chunked::warp_band::<$t>(
-                                &t,
-                                chunks,
-                                *method,
-                                &$v[k * n_src..(k + 1) * n_src],
-                                origin,
-                                extent,
-                                &mut out[k * n_dst..(k + 1) * n_dst],
-                                ncol,
-                                nodata,
-                            );
-                        }
-                        Values::$variant(out)
-                    }};
-                }
-                match &buf.values {
-                    Values::U8(v) => run!(v, U8, u8),
-                    Values::I8(v) => run!(v, I8, i8),
-                    Values::U16(v) => run!(v, U16, u16),
-                    Values::I16(v) => run!(v, I16, i16),
-                    Values::U32(v) => run!(v, U32, u32),
-                    Values::I32(v) => run!(v, I32, i32),
-                    Values::U64(v) => run!(v, U64, u64),
-                    Values::I64(v) => run!(v, I64, i64),
-                    Values::F32(v) => run!(v, F32, f32),
-                    Values::F64(v) => run!(v, F64, f64),
-                }
-            }
-            Route::Chunked {
-                kernel: chunked::ChunkKernel::Rwarp(_),
-                chunks,
-                ..
-            } => {
+            Route::Chunked { chunks, .. } => {
                 let origin = [x0 as i32, y0 as i32];
                 let extent = [xs as i32, ys as i32];
                 macro_rules! run {
@@ -928,7 +873,7 @@ impl WarpPlan {
                         let nd = nodata.map(|n| n as $t);
                         let mut out = vec![nd.unwrap_or(0 as $t); b * n_dst];
                         for k in 0..b {
-                            chunked::warp_band_rwarp::<$t>(
+                            chunked::warp_band::<$t>(
                                 &t,
                                 chunks,
                                 &self.opts,
@@ -1110,15 +1055,6 @@ fn plain_scaling(opts: &WarpOptions) -> KernelScaling {
         (Some([x, y]), _) => KernelScaling::Fixed { x, y },
         (None, ResampleAlg::Average | ResampleAlg::Mode) => KernelScaling::WidenWhenDownsampling,
         (None, _) => KernelScaling::Point,
-    }
-}
-
-fn method(alg: ResampleAlg) -> Option<wxy_resample::Method> {
-    match alg {
-        ResampleAlg::NearestNeighbour => Some(wxy_resample::Method::Nearest),
-        ResampleAlg::Bilinear => Some(wxy_resample::Method::Bilinear),
-        ResampleAlg::Cubic => Some(wxy_resample::Method::Cubic),
-        _ => None,
     }
 }
 

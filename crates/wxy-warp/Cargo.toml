@@ -1,6 +1,6 @@
 [package]
 name = "wxy-warp"
-description = "Warp wxylib sources to a target grid: GDAL's chunked warp with wxy-resample kernels, or one pass through rwarp."
+description = "Warp wxylib sources to a target grid: GDAL's chunked warp with rwarp's kernels, or one pass through rwarp."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,19 +11,17 @@ categories = ["science::geo"]
 [dependencies]
 wxy-domain.workspace = true
 wxy-source.workspace = true
-# rwarp is external (design doc 03, A2). Pinned to the repository until a
-# release carries the proj4rs backend and the 0.2 kernels (warp() with
-# WarpOptions, average and mode; hypertidy/rwarp#3); crates.io 0.1.1
-# predates them.
-wxy-resample.workspace = true
 # exact cell coverage of polygons (exactextract's algorithm), sparse
 controlledburn = "0.2.1"
 # plans and options as values (EXPLAIN, dry runs, bindings)
 serde.workspace = true
-# the same proj4rs rwarp pins: two copies in one wasm build both export
+# the same proj4rs rwarp uses: two copies in one wasm build both export
 # proj4rs's wasm-bindgen `Point`, which wasm-bindgen refuses
-proj4rs = { git = "https://github.com/3liz/proj4rs", rev = "764671bd352a15dfbc68ccc8ca5bc2c699935520", default-features = false, features = ["crs-definitions"] }
-rwarp = { git = "https://github.com/hypertidy/rwarp", rev = "4f1ab196e3e270626e4fcc649444b9dfe87de59e", default-features = false, features = ["proj4rs"] }
+proj4rs = { version = "0.3.0", default-features = false, features = ["crs-definitions"] }
+# rwarp is external (design doc 03, A2). Pinned to the repository until a
+# release is on crates.io (0.2.0, with the proj4rs backend and the
+# kernels the chunked warp runs); crates.io 0.1.1 predates them.
+rwarp = { git = "https://github.com/hypertidy/rwarp", rev = "c42d130b3adf19ebcc577050c513a33750b43a8b", default-features = false, features = ["proj4rs"] }
 
 [dev-dependencies]
 async-trait.workspace = true
