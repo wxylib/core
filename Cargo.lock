@@ -1166,9 +1166,9 @@ dependencies = [
 
 [[package]]
 name = "controlledburn"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eba1e24534d8a9dbb5db296c75532efb0e87e935dc0a8808bc79e24f3c20c00"
+checksum = "6f8750438e3add7134dd0cb0091976a156ad4ba3ccdf05beed20dfd6c474ab72"
 
 [[package]]
 name = "convert_case"
@@ -3775,9 +3775,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rwarp"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "188cb8dca476923b35761be4088f46e812787c17d0c3407c83e7614aca13bb46"
+checksum = "990539d6f3ccc5227217416e306423664d92e0dfed89ad977caf73d4aad4a81b"
 dependencies = [
  "controlledburn",
  "proj4rs",
