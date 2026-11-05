@@ -28,6 +28,6 @@ for case in set.cases_with_op("raster.read") {
 }
 ```
 
-Design: wxylib/design `docs/m26-oracle-harness.md`. It lives in the
+Design: wxylib/design `docs/m27-oracle-harness.md`. It lives in the
 wxylib/core workspace with no wxy dependencies, to be extracted when
 another project uses it.
