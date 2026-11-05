@@ -41,7 +41,7 @@ pub use wxy_refs::{from_refs_table, ChunkRef, VirtualArray};
 /// Scan level 0 of a local TIFF into a virtual array at `/data`.
 pub async fn scan_tiff(path: impl AsRef<Path>) -> Result<VirtualArray> {
     let path = std::fs::canonicalize(path.as_ref()).map_err(|e| Error::Fetch(e.to_string()))?;
-    let url = format!("file://{}", path.display());
+    let url: std::sync::Arc<str> = format!("file://{}", path.display()).into();
     let ds = wxy_tiff::open_path(&path).await?;
     let level = &ds.levels[0];
     let ifd = level.ifd();

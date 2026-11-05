@@ -17,14 +17,49 @@ use zarrs::storage::{
 
 use crate::VirtualArray;
 
+/// One referenced chunk, by its linear index in its array's chunk grid
+/// (C order): the source it is read from (an index into
+/// [`RefsStore::sources`]) and its byte range there. 32 bytes a chunk,
+/// so the 22.8M references of the whole GHRSST MUR series take about
+/// 730 MB (m06 C4).
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    index: u64,
+    source: u32,
+    offset: u64,
+    length: u64,
+}
+
+/// The referenced chunks of one array, sorted by linear index.
+struct ArrayRefs {
+    counts: Vec<u64>,
+    slots: Vec<Slot>,
+}
+
+impl ArrayRefs {
+    fn find(&self, key: &[u64]) -> Option<&Slot> {
+        if key.len() != self.counts.len() || key.iter().zip(&self.counts).any(|(k, c)| k >= c) {
+            return None;
+        }
+        let i = linear(key, &self.counts);
+        let at = self.slots.binary_search_by_key(&i, |s| s.index).ok()?;
+        Some(&self.slots[at])
+    }
+}
+
+/// The position of `key` in C order over `counts`.
+fn linear(key: &[u64], counts: &[u64]) -> u64 {
+    key.iter().zip(counts).fold(0, |i, (k, c)| i * c + k)
+}
+
 /// What a store key holds.
-enum Entry {
+enum Entry<'a> {
     /// Encoded bytes held in the table (metadata, inline chunks).
-    Held(Bytes),
+    Held(&'a Bytes),
     /// A byte range of a source, read on demand.
     Ref {
-        source: String,
-        url: String,
+        source: &'a str,
+        url: &'a str,
         offset: u64,
         length: u64,
     },
@@ -48,11 +83,18 @@ pub struct RefsStats {
 /// the `AWS_*` environment, see [`crate::location`]);
 /// a key the table does not hold is missing, so zarrs reads the fill value.
 ///
+/// References are held compactly: each source's name and URL once, and
+/// per chunk only its grid position, source number and byte range, looked
+/// up by binary search. [`RefsStore::from_arrays`] frees each array's
+/// [`ChunkRef`](crate::ChunkRef)s as it indexes them.
+///
 /// With a cache, each range is looked up first under the source's
 /// validator (etag, else size and modification time, from the file or a
 /// HEAD request, once per source) and kept after a fetch.
 pub struct RefsStore {
-    entries: HashMap<String, Entry>,
+    held: HashMap<String, Bytes>,
+    arrays: HashMap<String, ArrayRefs>,
+    sources: Vec<(Arc<str>, Arc<str>)>,
     cache: Option<Arc<Cache>>,
     stores: Mutex<HashMap<String, Arc<dyn ObjectStore>>>,
     validators: tokio::sync::Mutex<HashMap<String, Validator>>,
@@ -72,41 +114,142 @@ pub fn chunk_key(path: &str, key: &[u64]) -> String {
     k
 }
 
-impl RefsStore {
-    /// A store over `arrays`, reading through `cache` when given.
-    pub fn new(arrays: &[VirtualArray], cache: Option<Arc<Cache>>) -> Result<Self> {
+/// A chunk store key split into its array's path and grid position.
+fn split_chunk_key(key: &str) -> Option<(&str, Vec<u64>)> {
+    let (path, rest) = if let Some(rest) = key.strip_prefix("c/") {
+        ("", rest)
+    } else {
+        let at = key.rfind("/c/")?;
+        (&key[..at], &key[at + 3..])
+    };
+    let pos = rest
+        .split('/')
+        .map(|p| p.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some((path, pos))
+}
+
+/// The chunk grid shape of a Zarr v3 array's metadata.
+fn chunk_counts(path: &str, meta: &serde_json::Value) -> Result<Vec<u64>> {
+    let ints = |v: &serde_json::Value| -> Option<Vec<u64>> {
+        v.as_array()?.iter().map(|x| x.as_u64()).collect()
+    };
+    let bad = || Error::Decode(format!("{path}: no regular chunk grid in its metadata"));
+    let shape = ints(&meta["shape"]).ok_or_else(bad)?;
+    let chunks = ints(&meta["chunk_grid"]["configuration"]["chunk_shape"]).ok_or_else(bad)?;
+    if shape.len() != chunks.len() || chunks.contains(&0) {
+        return Err(bad());
+    }
+    Ok(shape
+        .iter()
+        .zip(&chunks)
+        .map(|(s, c)| s.div_ceil(*c))
+        .collect())
+}
+
+/// Builds a store's tables one array at a time.
+struct Builder {
+    held: HashMap<String, Bytes>,
+    arrays: HashMap<String, ArrayRefs>,
+    sources: Vec<(Arc<str>, Arc<str>)>,
+    ids: HashMap<(Arc<str>, Arc<str>), u32>,
+}
+
+impl Builder {
+    fn new() -> Self {
+        let mut held = HashMap::new();
+        held.insert(
+            "zarr.json".to_string(),
+            Bytes::from_static(br#"{"zarr_format":3,"node_type":"group"}"#),
+        );
+        Builder {
+            held,
+            arrays: HashMap::new(),
+            sources: Vec::new(),
+            ids: HashMap::new(),
+        }
+    }
+
+    fn add(
+        &mut self,
+        a: &VirtualArray,
+        refs: impl ExactSizeIterator<Item = crate::ChunkRef>,
+    ) -> Result<()> {
         let group = Bytes::from_static(br#"{"zarr_format":3,"node_type":"group"}"#);
-        let mut entries = HashMap::new();
-        entries.insert("zarr.json".to_string(), Entry::Held(group.clone()));
-        for a in arrays {
-            let path = a.path.trim_start_matches('/');
-            // groups above a nested array
-            let parts: Vec<&str> = path.split('/').collect();
-            for i in 1..parts.len() {
-                entries
-                    .entry(format!("{}/zarr.json", parts[..i].join("/")))
-                    .or_insert_with(|| Entry::Held(group.clone()));
+        let path = a.path.trim_start_matches('/');
+        // groups above a nested array
+        let parts: Vec<&str> = path.split('/').collect();
+        for i in 1..parts.len() {
+            self.held
+                .entry(format!("{}/zarr.json", parts[..i].join("/")))
+                .or_insert_with(|| group.clone());
+        }
+        let meta = serde_json::to_vec(&a.metadata)
+            .map_err(|e| Error::Decode(format!("{}: {e}", a.path)))?;
+        self.held.insert(format!("{path}/zarr.json"), meta.into());
+        for (k, bytes) in &a.inline {
+            self.held
+                .insert(chunk_key(path, k), Bytes::copy_from_slice(bytes));
+        }
+        if refs.len() == 0 {
+            return Ok(());
+        }
+        let counts = chunk_counts(&a.path, &a.metadata)?;
+        let mut slots = Vec::with_capacity(refs.len());
+        for r in refs {
+            if r.key.len() != counts.len() || r.key.iter().zip(&counts).any(|(k, c)| k >= c) {
+                return Err(Error::Decode(format!(
+                    "{}: chunk {:?} is outside the grid",
+                    a.path, r.key
+                )));
             }
-            let meta = serde_json::to_vec(&a.metadata)
-                .map_err(|e| Error::Decode(format!("{}: {e}", a.path)))?;
-            entries.insert(format!("{path}/zarr.json"), Entry::Held(meta.into()));
-            for (k, bytes) in &a.inline {
-                entries.insert(chunk_key(path, k), Entry::Held(bytes.clone().into()));
-            }
-            for r in &a.refs {
-                entries.insert(
-                    chunk_key(path, &r.key),
-                    Entry::Ref {
-                        source: r.source.clone(),
-                        url: r.url.clone(),
-                        offset: r.offset,
-                        length: r.length,
-                    },
-                );
+            let next = self.sources.len() as u32;
+            let source = *self
+                .ids
+                .entry((r.source.clone(), r.url.clone()))
+                .or_insert_with(|| {
+                    self.sources.push((r.source.clone(), r.url.clone()));
+                    next
+                });
+            slots.push(Slot {
+                index: linear(&r.key, &counts),
+                source,
+                offset: r.offset,
+                length: r.length,
+            });
+        }
+        // stable, so of two rows for one chunk the later stands, as the
+        // table's last word on it
+        slots.sort_by_key(|s| s.index);
+        let mut kept: Vec<Slot> = Vec::with_capacity(slots.len());
+        for s in slots {
+            match kept.last_mut() {
+                Some(last) if last.index == s.index => *last = s,
+                _ => kept.push(s),
             }
         }
-        Ok(RefsStore {
-            entries,
+        kept.shrink_to_fit();
+        // an inline chunk is held, not referenced
+        let inline: std::collections::HashSet<u64> =
+            a.inline.iter().map(|(k, _)| linear(k, &counts)).collect();
+        if !inline.is_empty() {
+            kept.retain(|s| !inline.contains(&s.index));
+        }
+        self.arrays.insert(
+            path.to_string(),
+            ArrayRefs {
+                counts,
+                slots: kept,
+            },
+        );
+        Ok(())
+    }
+
+    fn finish(self, cache: Option<Arc<Cache>>) -> RefsStore {
+        RefsStore {
+            held: self.held,
+            arrays: self.arrays,
+            sources: self.sources,
             cache,
             stores: Mutex::new(HashMap::new()),
             validators: tokio::sync::Mutex::new(HashMap::new()),
@@ -114,7 +257,55 @@ impl RefsStore {
             hit_bytes: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             miss_bytes: AtomicU64::new(0),
+        }
+    }
+}
+
+impl RefsStore {
+    /// A store over `arrays`, reading through `cache` when given.
+    pub fn new(arrays: &[VirtualArray], cache: Option<Arc<Cache>>) -> Result<Self> {
+        let mut b = Builder::new();
+        for a in arrays {
+            b.add(a, a.refs.iter().cloned())?;
+        }
+        Ok(b.finish(cache))
+    }
+
+    /// A store over `arrays`, as [`RefsStore::new`], freeing each array's
+    /// references once they are indexed: what a large table needs.
+    pub fn from_arrays(arrays: Vec<VirtualArray>, cache: Option<Arc<Cache>>) -> Result<Self> {
+        let mut b = Builder::new();
+        for mut a in arrays {
+            let refs = std::mem::take(&mut a.refs);
+            b.add(&a, refs.into_iter())?;
+        }
+        Ok(b.finish(cache))
+    }
+
+    /// What `key` holds, if anything.
+    fn entry(&self, key: &str) -> Option<Entry<'_>> {
+        if let Some(b) = self.held.get(key) {
+            return Some(Entry::Held(b));
+        }
+        let (path, pos) = split_chunk_key(key)?;
+        let s = self.arrays.get(path)?.find(&pos)?;
+        let (source, url) = &self.sources[s.source as usize];
+        Some(Entry::Ref {
+            source,
+            url,
+            offset: s.offset,
+            length: s.length,
         })
+    }
+
+    /// References held, over all arrays.
+    pub fn len(&self) -> usize {
+        self.arrays.values().map(|a| a.slots.len()).sum()
+    }
+
+    /// Whether the store holds no references.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// The cache this store reads through, if any.
@@ -135,8 +326,8 @@ impl RefsStore {
     /// The byte range stored for a chunk key (`<array>/c/...`), when the
     /// table references one: what a plan reads for that chunk.
     pub fn stored_range(&self, key: &str) -> Option<std::ops::Range<u64>> {
-        match self.entries.get(key)? {
-            Entry::Ref { offset, length, .. } => Some(*offset..offset + length),
+        match self.entry(key)? {
+            Entry::Ref { offset, length, .. } => Some(offset..offset + length),
             Entry::Held(_) => None,
         }
     }
@@ -152,14 +343,14 @@ impl RefsStore {
                 offset,
                 length,
             }),
-        ) = (&self.cache, self.entries.get(key))
+        ) = (&self.cache, self.entry(key))
         else {
             return Ok(None);
         };
         let v = self.validator(source, url).await?;
         Ok(Some((
-            cache.contains(source, *offset..offset + length, &v),
-            *length,
+            cache.contains(source, offset..offset + length, &v),
+            length,
         )))
     }
 
@@ -247,7 +438,7 @@ impl RefsStore {
     }
 
     async fn value(&self, key: &StoreKey) -> Result<Option<Bytes>> {
-        match self.entries.get(key.as_str()) {
+        match self.entry(key.as_str()) {
             None => Ok(None),
             Some(Entry::Held(b)) => Ok(Some(b.clone())),
             Some(Entry::Ref {
@@ -255,7 +446,7 @@ impl RefsStore {
                 url,
                 offset,
                 length,
-            }) => Ok(Some(self.fetch(source, url, *offset, *length).await?)),
+            }) => Ok(Some(self.fetch(source, url, offset, length).await?)),
         }
     }
 }
@@ -290,10 +481,10 @@ impl AsyncReadableStorageTraits for RefsStore {
     }
 
     async fn size_key(&self, key: &StoreKey) -> std::result::Result<Option<u64>, StorageError> {
-        Ok(match self.entries.get(key.as_str()) {
+        Ok(match self.entry(key.as_str()) {
             None => None,
             Some(Entry::Held(b)) => Some(b.len() as u64),
-            Some(Entry::Ref { length, .. }) => Some(*length),
+            Some(Entry::Ref { length, .. }) => Some(length),
         })
     }
 

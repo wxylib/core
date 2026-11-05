@@ -17,10 +17,12 @@
 
 pub mod kerchunk;
 pub mod location;
+pub mod source;
 pub mod store;
 pub mod table;
 
 pub use kerchunk::from_kerchunk_at;
+pub use source::RefsSource;
 pub use store::{chunk_key, RefsStats, RefsStore};
 pub use table::{from_refs_table, from_refs_table_at};
 
@@ -52,12 +54,14 @@ pub async fn open_refs_at(
 
 /// A reference to one stored chunk: its key in the Zarr chunk grid, the
 /// source it was scanned from (as the table names it, before any remap),
-/// the URL it is read from, and the bytes that hold it.
+/// the URL it is read from, and the bytes that hold it. A table names
+/// few sources for many chunks, so each source's strings are shared
+/// between its references.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkRef {
     pub key: Vec<u64>,
-    pub source: String,
-    pub url: String,
+    pub source: std::sync::Arc<str>,
+    pub url: std::sync::Arc<str>,
     pub offset: u64,
     pub length: u64,
 }
