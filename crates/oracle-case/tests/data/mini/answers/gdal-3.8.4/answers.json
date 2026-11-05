@@ -1,0 +1,99 @@
+{
+ "format": "oracle-case/0",
+ "set": "mini",
+ "oracle": {
+  "name": "gdal",
+  "version": "3.8.4",
+  "release": "3.8.4",
+  "via": "osgeo.gdal",
+  "python": "3.12.3",
+  "numpy": "1.26.4",
+  "proj": "9.4.0"
+ },
+ "recorded": "2026-11-05",
+ "answers": {
+  "f32/info": {
+   "status": "ok",
+   "info": {
+    "size": [
+     4,
+     3
+    ],
+    "bands": [
+     {
+      "dtype": "float32",
+      "nodata": -1.0,
+      "block": [
+       4,
+       3
+      ],
+      "overviews": [],
+      "scale": null,
+      "offset": null
+     }
+    ],
+    "geotransform": [
+     0.0,
+     1.0,
+     0.0,
+     3.0,
+     0.0,
+     -1.0
+    ],
+    "crs": {
+     "wkt": "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Latitude\",NORTH],AXIS[\"Longitude\",EAST],AUTHORITY[\"EPSG\",\"4326\"]]",
+     "code": "EPSG:4326"
+    }
+   }
+  },
+  "f32/all": {
+   "status": "ok",
+   "values": {
+    "file": "answers/gdal-3.8.4/f32__all.bin",
+    "dtype": "float32",
+    "shape": [
+     1,
+     3,
+     4
+    ],
+    "order": "C",
+    "endian": "little",
+    "sha256": "29a94dad025f46efe05dd4afb4f3ef2f7818fcc7108d0b866639c707b56993b6"
+   }
+  },
+  "f32/up": {
+   "status": "ok",
+   "values": {
+    "file": "answers/gdal-3.8.4/f32__up.bin",
+    "dtype": "float32",
+    "shape": [
+     1,
+     4,
+     4
+    ],
+    "order": "C",
+    "endian": "little",
+    "sha256": "fa09f58fbde7fa8a3e3fc1a50d961d0d208a4d9baca62ec68d8c5f01cb5cc4d1"
+   }
+  },
+  "i16/band2": {
+   "status": "ok",
+   "values": {
+    "file": "answers/gdal-3.8.4/i16__band2.bin",
+    "dtype": "int16",
+    "shape": [
+     1,
+     2,
+     2
+    ],
+    "order": "C",
+    "endian": "little",
+    "sha256": "babfab1342ed5c83c66447c5ab502d73bdf57139e68c54243663eb3e074f1200"
+   }
+  },
+  "missing": {
+   "status": "error",
+   "error": "no-such-file.tif: No such file or directory"
+  }
+ }
+}
