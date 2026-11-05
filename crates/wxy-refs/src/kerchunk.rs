@@ -245,7 +245,8 @@ async fn read_chunks(
     let total: u64 = counts.iter().product();
     let mut refs = Vec::new();
     let mut inline = Vec::new();
-    let mut urls: HashMap<String, String> = HashMap::new();
+    // one shared (source, url) pair per distinct path
+    let mut urls: HashMap<String, (Arc<str>, Arc<str>)> = HashMap::new();
     for file in 0..total.div_ceil(record) {
         let label = format!("{dir}{}/refs.{file}.parq", row.name);
         let bytes = get(&label).await?;
@@ -301,17 +302,17 @@ async fn read_chunks(
                             )));
                         }
                         let p = p.value(r);
-                        let u = match urls.get(p) {
+                        let (source, u) = match urls.get(p) {
                             Some(u) => u.clone(),
                             None => {
-                                let u = url(p)?;
+                                let u = (Arc::from(p), Arc::from(url(p)?));
                                 urls.insert(p.to_string(), u.clone());
                                 u
                             }
                         };
                         refs.push(ChunkRef {
                             key,
-                            source: p.to_string(),
+                            source,
                             url: u,
                             offset: o.value(r) as u64,
                             length,

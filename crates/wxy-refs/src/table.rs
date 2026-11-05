@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arrow_array::{Array, BinaryArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::DataType as ArrowType;
@@ -560,7 +561,8 @@ fn read_refs(
         .zip(&row.chunks)
         .map(|(s, c)| s.div_ceil(*c))
         .collect();
-    let mut urls: HashMap<String, String> = HashMap::new();
+    // one shared (source, url) pair per distinct path
+    let mut urls: HashMap<String, (Arc<str>, Arc<str>)> = HashMap::new();
     let mut out = Vec::new();
     let mut inline = Vec::new();
     for batch in reader {
@@ -613,17 +615,17 @@ fn read_refs(
                 continue;
             }
             let p = path.value(r);
-            let u = match urls.get(p) {
+            let (source, u) = match urls.get(p) {
                 Some(u) => u.clone(),
                 None => {
-                    let u = url(p)?;
+                    let u = (Arc::from(p), Arc::from(url(p)?));
                     urls.insert(p.to_string(), u.clone());
                     u
                 }
             };
             out.push(ChunkRef {
                 key,
-                source: p.to_string(),
+                source,
                 url: u,
                 offset: offset.value(r) as u64,
                 length: size.value(r) as u64,
@@ -652,7 +654,6 @@ fn int_column(batch: &RecordBatch, name: &str) -> Result<Int64Array> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use arrow_array::{ArrayRef, BinaryArray, Int64Array, Int8Array};
     use parquet::arrow::ArrowWriter;
@@ -723,7 +724,7 @@ mod tests {
             vec![ChunkRef {
                 key: vec![0, 0],
                 source: "/src/a.bin".into(),
-                url: format!("file://{}", local.display()),
+                url: format!("file://{}", local.display()).into(),
                 offset: 4,
                 length: 8,
             }]

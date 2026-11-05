@@ -283,12 +283,15 @@ async fn open_cached(
 ) -> Result<Opened, Failure> {
     if is_refs_table(path) {
         let arrays = wxy_refs::open_refs_at(&path.to_string_lossy(), remap).await?;
-        let store = std::sync::Arc::new(wxy_refs::RefsStore::new(&arrays, cache.cloned())?);
+        let store = std::sync::Arc::new(wxy_refs::RefsStore::from_arrays(arrays, cache.cloned())?);
         let name = array.trim_start_matches('/');
         let ds = wxy_zarr::open(store.clone(), name).await?;
         let mut c = ds.collection;
+        // chunks know their stored ranges from the table, so a plain
+        // --dry-run reports the bytes a run reads
+        let level = wxy_refs::RefsSource::new(ds.source, store.clone(), name);
         return Ok(Opened {
-            levels: vec![Box::new(ds.source)],
+            levels: vec![Box::new(level)],
             nodata: c.fields[0].values.nodata,
             domains: vec![c.domains.swap_remove(0)],
             cache_key: None,

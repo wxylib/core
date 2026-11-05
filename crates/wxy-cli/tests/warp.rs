@@ -1092,7 +1092,7 @@ async fn a_cached_warp_reads_nothing_the_second_time() {
         for row in wxy_cache::read_fragment(&f).unwrap() {
             if let Some(r) = refs
                 .iter()
-                .find(|r| r.url == row.source && r.offset == row.offset && r.length == row.size)
+                .find(|r| *r.url == *row.source && r.offset == row.offset && r.length == row.size)
             {
                 keys.insert(r.key.clone());
             }
@@ -1150,6 +1150,37 @@ async fn a_refs_table_warps_through_the_cache() {
     let before = dry();
     assert_eq!(before["fetch"]["chunks"], 3);
     assert_eq!(before["fetch"]["cache"]["missing"], 3);
+    // m06 9a: a plain --dry-run, with no cache, gives the bytes the
+    // table says the run reads
+    let plain = Command::new(env!("CARGO_BIN_EXE_wxy"))
+        .arg("warp")
+        .arg(&src)
+        .arg(tmp.join("plain.zarr"))
+        .args(["--source-array", "/sst", "--remap", "fixture"])
+        .args([
+            "--crs",
+            "EPSG:3031",
+            "--extent",
+            "-4e6",
+            "-4e6",
+            "4e6",
+            "4e6",
+        ])
+        .args(["--size", "100", "100", "-r", "bilinear", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        plain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    let plain: Value = serde_json::from_slice(&plain.stdout).unwrap();
+    assert!(plain["fetch"]["cache"].is_null());
+    assert!(plain["fetch"]["stored_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(
+        plain["fetch"]["stored_bytes"],
+        before["fetch"]["cache"]["missing_bytes"]
+    );
     let first = String::from_utf8(wxy("a.zarr", &[]).stderr).unwrap();
     assert!(first.contains(", 3 from the source"), "{first}");
     let after = dry();
