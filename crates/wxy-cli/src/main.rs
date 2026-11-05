@@ -66,7 +66,8 @@ struct Zonal {
 struct Points {
     /// Source: a GeoTIFF file or https:// URL, or a Zarr store directory.
     source: PathBuf,
-    /// CRS of the points (EPSG:NNNN or a PROJ string).
+    /// CRS of the points (EPSG:NNNN or a PROJ string; built with the
+    /// terrio-crs feature, also WKT, PROJJSON, ESRI:NNNN or OGC:CRS84).
     #[arg(long, default_value = "EPSG:4326")]
     crs: String,
     /// Array to read in a Zarr source.
@@ -105,7 +106,8 @@ struct Warp {
     output: PathBuf,
     /// Target CRS as an EPSG:NNNN code, such as EPSG:3031. (The CRS backend
     /// also reads PROJ strings, but GeoZarr's proj: has no place to record
-    /// one; WKT2 and PROJJSON wait on a PROJ-backed CRS.)
+    /// one. Built with the terrio-crs feature, WKT2, PROJJSON and other
+    /// AUTH:CODE forms work too.)
     #[arg(long)]
     crs: String,
     /// Target extent: xmin ymin xmax ymax, in target CRS units.
