@@ -1,0 +1,601 @@
+{
+ "proj": "9.8.1",
+ "pyproj": "3.8.0",
+ "cases": [
+  {
+   "id": "3031",
+   "group": "epsg-polar",
+   "src": "EPSG:4326",
+   "dst": "EPSG:3031",
+   "lon": 147,
+   "lat": -75,
+   "oracle": [
+    892545.3215649187,
+    -1374399.2692944382
+   ],
+   "oracle_inv": [
+    147.0,
+    -74.99999999999999
+   ],
+   "op": "Antarctic Polar Stereographic (with axis order normalized for visualization)"
+  },
+  {
+   "id": "3412",
+   "group": "epsg-polar",
+   "src": "EPSG:4326",
+   "dst": "EPSG:3412",
+   "lon": 0,
+   "lat": -70,
+   "oracle": [
+    0.0,
+    2187973.8190250075
+   ],
+   "oracle_inv": [
+    0.0,
+    -69.99999999999994
+   ],
+   "op": "Ballpark geographic offset from WGS 84 to Hughes 1980 + US NSIDC Sea Ice polar stereographic south (with axis order normalized for visualization)"
+  },
+  {
+   "id": "3413",
+   "group": "epsg-polar",
+   "src": "EPSG:4326",
+   "dst": "EPSG:3413",
+   "lon": -45,
+   "lat": 75,
+   "oracle": [
+    0.0,
+    -1633879.4974707854
+   ],
+   "oracle_inv": [
+    -45.0,
+    74.99999999999999
+   ],
+   "op": "US NSIDC Sea Ice polar stereographic north (with axis order normalized for visualization)"
+  },
+  {
+   "id": "3976",
+   "group": "epsg-polar",
+   "src": "EPSG:4326",
+   "dst": "EPSG:3976",
+   "lon": 100,
+   "lat": -65,
+   "oracle": [
+    2708465.2282142844,
+    -477575.49604488816
+   ],
+   "oracle_inv": [
+    100.0,
+    -64.9999999999997
+   ],
+   "op": "US NSIDC Sea Ice polar stereographic south (with axis order normalized for visualization)"
+  },
+  {
+   "id": "9354",
+   "group": "epsg-polar",
+   "src": "EPSG:4326",
+   "dst": "EPSG:9354",
+   "lon": 30,
+   "lat": -68,
+   "oracle": [
+    1185134.1225770537,
+    2052712.514087019
+   ],
+   "oracle_inv": [
+    29.999999999999996,
+    -67.99999999999989
+   ],
+   "op": "IBCSO Polar Stereographic (with axis order normalized for visualization)"
+  },
+  {
+   "id": "3577",
+   "group": "epsg-other",
+   "src": "EPSG:4326",
+   "dst": "EPSG:3577",
+   "lon": 147,
+   "lat": -35,
+   "oracle": [
+    1362365.5637248764,
+    -3902190.429790802
+   ],
+   "oracle_inv": [
+    147.0,
+    -35.0
+   ],
+   "op": "unavailable until proj_trans is called"
+  },
+  {
+   "id": "32755",
+   "group": "epsg-other",
+   "src": "EPSG:4326",
+   "dst": "EPSG:32755",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    500000.0000000021,
+    5350223.775180822
+   ],
+   "oracle_inv": [
+    147.0,
+    -41.99999999999999
+   ],
+   "op": "UTM zone 55S (with axis order normalized for visualization)"
+  },
+  {
+   "id": "3857",
+   "group": "epsg-other",
+   "src": "EPSG:4326",
+   "dst": "EPSG:3857",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    16363965.146611214,
+    -5160979.444049781
+   ],
+   "oracle_inv": [
+    147.0,
+    -42.0
+   ],
+   "op": "Popular Visualisation Pseudo-Mercator (with axis order normalized for visualization)"
+  },
+  {
+   "id": "6933",
+   "group": "epsg-other",
+   "src": "EPSG:4326",
+   "dst": "EPSG:6933",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    14183483.196881786,
+    -4900750.206464033
+   ],
+   "oracle_inv": [
+    147.0,
+    -41.99999999999999
+   ],
+   "op": "US NSIDC EASE-Grid 2.0 Global (with axis order normalized for visualization)"
+  },
+  {
+   "id": "3112",
+   "group": "epsg-other",
+   "src": "EPSG:4326",
+   "dst": "EPSG:3112",
+   "lon": 133,
+   "lat": -25,
+   "oracle": [
+    -99779.56296388883,
+    -2842254.806876369
+   ],
+   "oracle_inv": [
+    133.0,
+    -25.00000000000001
+   ],
+   "op": "unavailable until proj_trans is called"
+  },
+  {
+   "id": "4283-7844",
+   "group": "datum",
+   "src": "EPSG:4283",
+   "dst": "EPSG:7844",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    147.00000504277864,
+    -41.999987009918144
+   ],
+   "oracle_inv": [
+    146.99999999999704,
+    -41.99999999999936
+   ],
+   "op": "GDA94 to GDA2020 (1) (with axis order normalized for visualization)"
+  },
+  {
+   "id": "4269-26711",
+   "group": "datum",
+   "src": "EPSG:4269",
+   "dst": "EPSG:26711",
+   "lon": -117,
+   "lat": 34,
+   "oracle": [
+    500079.28055088426,
+    3761959.5665662554
+   ],
+   "oracle_inv": [
+    -117.00000000287777,
+    34.00000000093465
+   ],
+   "op": "unavailable until proj_trans is called"
+  },
+  {
+   "id": "laea-south",
+   "group": "proj-polar",
+   "src": "EPSG:4326",
+   "dst": "+proj=laea +lat_0=-90 +lon_0=0 +datum=WGS84 +units=m",
+   "lon": 147,
+   "lat": -70,
+   "oracle": [
+    1210008.6882868956,
+    -1863249.9850042306
+   ],
+   "oracle_inv": [
+    147.0,
+    -69.99999999999999
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "laea-north",
+   "group": "proj-polar",
+   "src": "EPSG:4326",
+   "dst": "+proj=laea +lat_0=90 +lon_0=0 +datum=WGS84 +units=m",
+   "lon": 10,
+   "lat": 70,
+   "oracle": [
+    385789.1009893824,
+    -2187918.7146477452
+   ],
+   "oracle_inv": [
+    10.0,
+    69.99999999999999
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "aeqd-south",
+   "group": "proj-polar",
+   "src": "EPSG:4326",
+   "dst": "+proj=aeqd +lat_0=-90 +lon_0=0 +datum=WGS84 +units=m",
+   "lon": 147,
+   "lat": -60,
+   "oracle": [
+    1823393.1637392212,
+    -2807779.2481010524
+   ],
+   "oracle_inv": [
+    147.0,
+    -59.99999999999999
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "aeqd-oblique",
+   "group": "proj-local",
+   "src": "EPSG:4326",
+   "dst": "+proj=aeqd +lat_0=-42 +lon_0=147 +datum=WGS84 +units=m",
+   "lon": 150,
+   "lat": -40,
+   "oracle": [
+    256182.9858450904,
+    217677.0705922459
+   ],
+   "oracle_inv": [
+    150.0,
+    -39.99999999999999
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "stere-south",
+   "group": "proj-polar",
+   "src": "EPSG:4326",
+   "dst": "+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +datum=WGS84 +units=m",
+   "lon": 147,
+   "lat": -75,
+   "oracle": [
+    892545.3215649187,
+    -1374399.2692944382
+   ],
+   "oracle_inv": [
+    147.0,
+    -74.99999999999999
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "ob_tran-cordex",
+   "group": "proj-rotated",
+   "src": "EPSG:4326",
+   "dst": "+proj=ob_tran +o_proj=longlat +o_lon_p=-162 +o_lat_p=39.25 +lon_0=180 +datum=WGS84",
+   "lon": 10,
+   "lat": 50,
+   "oracle": [
+    167.91934779281974,
+    77.13262375623069
+   ],
+   "oracle_inv": [
+    9.99999999999999,
+    49.999999999999986
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "ortho",
+   "group": "proj-local",
+   "src": "EPSG:4326",
+   "dst": "+proj=ortho +lat_0=-42 +lon_0=147 +ellps=WGS84 +units=m",
+   "lon": 140,
+   "lat": -30,
+   "oracle": [
+    -673725.0068057647,
+    1294242.3825128307
+   ],
+   "oracle_inv": [
+    140.0,
+    -29.999999999999996
+   ],
+   "op": "Ballpark geographic offset from WGS 84 to unknown + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "geos-himawari",
+   "group": "proj-sat",
+   "src": "EPSG:4326",
+   "dst": "+proj=geos +h=35785831 +lon_0=140.7 +sweep=y +datum=WGS84 +units=m",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    497786.8934945899,
+    -4039773.456106124
+   ],
+   "oracle_inv": [
+    147.0,
+    -41.99999999999997
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "geos-goes",
+   "group": "proj-sat",
+   "src": "EPSG:4326",
+   "dst": "+proj=geos +h=35786023 +lon_0=-75 +sweep=x +ellps=GRS80 +units=m",
+   "lon": -80,
+   "lat": 30,
+   "oracle": [
+    -468595.77315508184,
+    3087367.4762363513
+   ],
+   "oracle_inv": [
+    -79.99999999999999,
+    29.999999999999932
+   ],
+   "op": "Ballpark geographic offset from WGS 84 to unknown + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "sinu-modis",
+   "group": "proj-world",
+   "src": "EPSG:4326",
+   "dst": "+proj=sinu +R=6371007.181 +units=m",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    12147202.041785443,
+    -4670192.183019398
+   ],
+   "oracle_inv": [
+    147.0,
+    -42.0
+   ],
+   "op": "Ballpark geographic offset from WGS 84 to unknown + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "moll",
+   "group": "proj-world",
+   "src": "EPSG:4326",
+   "dst": "+proj=moll +datum=WGS84 +units=m",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    12249358.90964633,
+    -5011701.366996126
+   ],
+   "oracle_inv": [
+    146.99999999999994,
+    -41.99999999999998
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "eqearth",
+   "group": "proj-world",
+   "src": "EPSG:4326",
+   "dst": "+proj=eqearth +datum=WGS84 +units=m",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    12332167.823895983,
+    -5142316.902045586
+   ],
+   "oracle_inv": [
+    146.99999999999997,
+    -41.999999999999986
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "robin",
+   "group": "proj-world",
+   "src": "EPSG:4326",
+   "dst": "+proj=robin +datum=WGS84 +units=m",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    12664073.708605956,
+    -4488495.335151117
+   ],
+   "oracle_inv": [
+    147.0,
+    -41.99999999999999
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "igh",
+   "group": "proj-world",
+   "src": "EPSG:4326",
+   "dst": "+proj=igh +datum=WGS84 +units=m",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    16168031.516279552,
+    -4674913.235357148
+   ],
+   "oracle_inv": [
+    146.99999999999997,
+    -41.999999999999986
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "eqc",
+   "group": "proj-world",
+   "src": "EPSG:4326",
+   "dst": "+proj=eqc +datum=WGS84 +units=m",
+   "lon": 147,
+   "lat": -42,
+   "oracle": [
+    16363965.146611214,
+    -4651636.879571007
+   ],
+   "oracle_inv": [
+    147.0,
+    -42.0
+   ],
+   "op": "axis order change (2D) + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "gnom-south",
+   "group": "proj-polar",
+   "src": "EPSG:4326",
+   "dst": "+proj=gnom +lat_0=-90 +lon_0=0 +R=6371000 +units=m",
+   "lon": 147,
+   "lat": -60,
+   "oracle": [
+    2003344.9809426307,
+    -3084880.7465873486
+   ],
+   "oracle_inv": [
+    147.0,
+    -59.999999999999986
+   ],
+   "op": "Ballpark geographic offset from WGS 84 to unknown + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "tpers",
+   "group": "proj-local",
+   "src": "EPSG:4326",
+   "dst": "+proj=tpers +h=5500000 +lat_0=-42 +lon_0=147 +tilt=10 +azi=20 +ellps=WGS84 +units=m",
+   "lon": 145,
+   "lat": -40,
+   "oracle": [
+    -234304.8698010481,
+    150391.3027602154
+   ],
+   "oracle_inv": [
+    145.0,
+    -39.99999999999999
+   ],
+   "op": "Transformation from WGS 84 to unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "nsper",
+   "group": "proj-local",
+   "src": "EPSG:4326",
+   "dst": "+proj=nsper +h=3000000 +lat_0=-42 +lon_0=147 +ellps=WGS84 +units=m",
+   "lon": 145,
+   "lat": -40,
+   "oracle": [
+    -170170.86224344166,
+    220154.73629119326
+   ],
+   "oracle_inv": [
+    145.0,
+    -39.99999999999999
+   ],
+   "op": "Ballpark geographic offset from WGS 84 to unknown + unknown (with axis order normalized for visualization)"
+  },
+  {
+   "id": "3031-wkt2",
+   "group": "form",
+   "src": "EPSG:4326",
+   "dst": "PROJCRS[\"WGS 84 / Antarctic Polar Stereographic\",BASEGEOGCRS[\"WGS 84\",ENSEMBLE[\"World Geodetic System 1984 ensemble\",MEMBER[\"World Geodetic System 1984 (Transit)\"],MEMBER[\"World Geodetic System 1984 (G730)\"],MEMBER[\"World Geodetic System 1984 (G873)\"],MEMBER[\"World Geodetic System 1984 (G1150)\"],MEMBER[\"World Geodetic System 1984 (G1674)\"],MEMBER[\"World Geodetic System 1984 (G1762)\"],MEMBER[\"World Geodetic System 1984 (G2139)\"],MEMBER[\"World Geodetic System 1984 (G2296)\"],ELLIPSOID[\"WGS 84\",6378137,298.257223563,LENGTHUNIT[\"metre\",1]],ENSEMBLEACCURACY[2.0]],PRIMEM[\"Greenwich\",0,ANGLEUNIT[\"degree\",0.0174532925199433]],ID[\"EPSG\",4326]],CONVERSION[\"Antarctic Polar Stereographic\",METHOD[\"Polar Stereographic (variant B)\",ID[\"EPSG\",9829]],PARAMETER[\"Latitude of standard parallel\",-71,ANGLEUNIT[\"degree\",0.0174532925199433],ID[\"EPSG\",8832]],PARAMETER[\"Longitude of origin\",0,ANGLEUNIT[\"degree\",0.0174532925199433],ID[\"EPSG\",8833]],PARAMETER[\"False easting\",0,LENGTHUNIT[\"metre\",1],ID[\"EPSG\",8806]],PARAMETER[\"False northing\",0,LENGTHUNIT[\"metre\",1],ID[\"EPSG\",8807]]],CS[Cartesian,2],AXIS[\"(E)\",north,MERIDIAN[90,ANGLEUNIT[\"degree\",0.0174532925199433]],ORDER[1],LENGTHUNIT[\"metre\",1]],AXIS[\"(N)\",north,MERIDIAN[0,ANGLEUNIT[\"degree\",0.0174532925199433]],ORDER[2],LENGTHUNIT[\"metre\",1]],USAGE[SCOPE[\"Antarctic Digital Database and small scale topographic mapping.\"],AREA[\"Antarctica.\"],BBOX[-90,-180,-60,180]],ID[\"EPSG\",3031]]",
+   "lon": 147,
+   "lat": -75,
+   "oracle": [
+    892545.3215649187,
+    -1374399.2692944382
+   ],
+   "oracle_inv": [
+    147.0,
+    -74.99999999999999
+   ],
+   "op": "Antarctic Polar Stereographic (with axis order normalized for visualization)"
+  },
+  {
+   "id": "3031-projjson",
+   "group": "form",
+   "src": "EPSG:4326",
+   "dst": "{\"$schema\":\"https://proj.org/schemas/v0.7/projjson.schema.json\",\"type\":\"ProjectedCRS\",\"name\":\"WGS 84 / Antarctic Polar Stereographic\",\"base_crs\":{\"type\":\"GeographicCRS\",\"name\":\"WGS 84\",\"datum_ensemble\":{\"name\":\"World Geodetic System 1984 ensemble\",\"members\":[{\"name\":\"World Geodetic System 1984 (Transit)\",\"id\":{\"authority\":\"EPSG\",\"code\":1166}},{\"name\":\"World Geodetic System 1984 (G730)\",\"id\":{\"authority\":\"EPSG\",\"code\":1152}},{\"name\":\"World Geodetic System 1984 (G873)\",\"id\":{\"authority\":\"EPSG\",\"code\":1153}},{\"name\":\"World Geodetic System 1984 (G1150)\",\"id\":{\"authority\":\"EPSG\",\"code\":1154}},{\"name\":\"World Geodetic System 1984 (G1674)\",\"id\":{\"authority\":\"EPSG\",\"code\":1155}},{\"name\":\"World Geodetic System 1984 (G1762)\",\"id\":{\"authority\":\"EPSG\",\"code\":1156}},{\"name\":\"World Geodetic System 1984 (G2139)\",\"id\":{\"authority\":\"EPSG\",\"code\":1309}},{\"name\":\"World Geodetic System 1984 (G2296)\",\"id\":{\"authority\":\"EPSG\",\"code\":1383}}],\"ellipsoid\":{\"name\":\"WGS 84\",\"semi_major_axis\":6378137,\"inverse_flattening\":298.257223563},\"accuracy\":\"2.0\",\"id\":{\"authority\":\"EPSG\",\"code\":6326}},\"coordinate_system\":{\"subtype\":\"ellipsoidal\",\"axis\":[{\"name\":\"Geodetic latitude\",\"abbreviation\":\"Lat\",\"direction\":\"north\",\"unit\":\"degree\"},{\"name\":\"Geodetic longitude\",\"abbreviation\":\"Lon\",\"direction\":\"east\",\"unit\":\"degree\"}]},\"id\":{\"authority\":\"EPSG\",\"code\":4326}},\"conversion\":{\"name\":\"Antarctic Polar Stereographic\",\"method\":{\"name\":\"Polar Stereographic (variant B)\",\"id\":{\"authority\":\"EPSG\",\"code\":9829}},\"parameters\":[{\"name\":\"Latitude of standard parallel\",\"value\":-71,\"unit\":\"degree\",\"id\":{\"authority\":\"EPSG\",\"code\":8832}},{\"name\":\"Longitude of origin\",\"value\":0,\"unit\":\"degree\",\"id\":{\"authority\":\"EPSG\",\"code\":8833}},{\"name\":\"False easting\",\"value\":0,\"unit\":\"metre\",\"id\":{\"authority\":\"EPSG\",\"code\":8806}},{\"name\":\"False northing\",\"value\":0,\"unit\":\"metre\",\"id\":{\"authority\":\"EPSG\",\"code\":8807}}]},\"coordinate_system\":{\"subtype\":\"Cartesian\",\"axis\":[{\"name\":\"Easting\",\"abbreviation\":\"E\",\"direction\":\"north\",\"meridian\":{\"longitude\":90},\"unit\":\"metre\"},{\"name\":\"Northing\",\"abbreviation\":\"N\",\"direction\":\"north\",\"meridian\":{\"longitude\":0},\"unit\":\"metre\"}]},\"scope\":\"Antarctic Digital Database and small scale topographic mapping.\",\"area\":\"Antarctica.\",\"bbox\":{\"south_latitude\":-90,\"west_longitude\":-180,\"north_latitude\":-60,\"east_longitude\":180},\"id\":{\"authority\":\"EPSG\",\"code\":3031}}",
+   "lon": 147,
+   "lat": -75,
+   "oracle": [
+    892545.3215649187,
+    -1374399.2692944382
+   ],
+   "oracle_inv": [
+    147.0,
+    -74.99999999999999
+   ],
+   "op": "Antarctic Polar Stereographic (with axis order normalized for visualization)"
+  },
+  {
+   "id": "3031-crs84",
+   "group": "form",
+   "src": "OGC:CRS84",
+   "dst": "EPSG:3031",
+   "lon": 147,
+   "lat": -75,
+   "oracle": [
+    892545.3215649187,
+    -1374399.2692944382
+   ],
+   "oracle_inv": [
+    147.0,
+    -74.99999999999999
+   ],
+   "op": "axis order change (2D) + Antarctic Polar Stereographic"
+  },
+  {
+   "id": "102020-esri",
+   "group": "form",
+   "src": "EPSG:4326",
+   "dst": "ESRI:102020",
+   "lon": 147,
+   "lat": -75,
+   "oracle": [
+    909683.3556637242,
+    -1400789.5275518484
+   ],
+   "oracle_inv": [
+    147.0,
+    -75.0
+   ],
+   "op": "axis order change (2D) + South_Pole_Lambert_Azimuthal_Equal_Area (with axis order normalized for visualization)"
+  },
+  {
+   "id": "3031-wkt1",
+   "group": "form",
+   "src": "EPSG:4326",
+   "dst": "PROJCS[\"WGS 84 / Antarctic Polar Stereographic\",GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4326\"]],PROJECTION[\"Polar_Stereographic\"],PARAMETER[\"latitude_of_origin\",-71],PARAMETER[\"central_meridian\",0],PARAMETER[\"false_easting\",0],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AUTHORITY[\"EPSG\",\"3031\"]]",
+   "lon": 147,
+   "lat": -75,
+   "oracle": [
+    892545.3215649187,
+    -1374399.2692944382
+   ],
+   "oracle_inv": [
+    147.0,
+    -74.99999999999999
+   ],
+   "op": "Antarctic Polar Stereographic (with axis order normalized for visualization)"
+  }
+ ]
+}

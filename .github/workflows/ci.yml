@@ -24,3 +24,8 @@ jobs:
       - run: cargo test --workspace
         env:
           WXY_FIXTURES: ${{ github.workspace }}/fixtures
+      # CRS engine trial: the warp, points and zonal suites again on
+      # terrio-crs in place of proj4rs (wxy-warp's crs module).
+      - run: cargo test -p wxy-warp -p wxy-cli --features wxy-warp/terrio-crs
+        env:
+          WXY_FIXTURES: ${{ github.workspace }}/fixtures
