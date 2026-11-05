@@ -16,7 +16,8 @@ jobs:
           # Pinned, so a fixtures change moves core's oracles only when
           # core says so. e203c85: warp, curvilinear, cf and index oracles
           # from GDAL 3.14.0dev-739fcf03bf (wxylib/fixtures#11, #12).
-          ref: e203c85f322bae598ec257763ae6f060937f3cc7
+          # fd6bb9f adds the vrt/ corpus (vrt-model's oracle).
+          ref: fd6bb9f056da202662d8e1e14c478f42147ef557
           path: fixtures
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
