@@ -1,0 +1,15 @@
+[package]
+name = "vrt-model"
+description = "A typed model of virtual dataset documents (classic raster VRT first) and a planner that says which source windows a read needs. No I/O, no pixel arithmetic."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+quick-xml = "0.38"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1"

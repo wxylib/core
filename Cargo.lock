@@ -3067,7 +3067,7 @@ dependencies = [
  "nix",
  "parking_lot",
  "percent-encoding",
- "quick-xml",
+ "quick-xml 0.41.0",
  "rand",
  "reqwest",
  "rustls-pki-types",
@@ -3314,6 +3314,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bdb2ff6e4d7329dc428ca2cb40f4c1ea85ef6c10aa6bd410294a1c835cd55567"
 dependencies = [
  "wasm-bindgen",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.38.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -4722,6 +4731,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vrt-model"
+version = "0.0.1"
+dependencies = [
+ "quick-xml 0.38.4",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "vsimd"
