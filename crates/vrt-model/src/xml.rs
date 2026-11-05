@@ -120,12 +120,13 @@ pub fn parse(text: &str) -> Result<Element, Error> {
             Event::Text(t) => {
                 let s = t.decode().map_err(|e| Error::Xml(e.to_string()))?;
                 let s = quick_xml::escape::unescape(&s).map_err(|e| Error::Xml(e.to_string()))?;
-                if !s.trim().is_empty() {
-                    stack
-                        .last_mut()
-                        .unwrap()
-                        .children
-                        .push(Node::Text(s.into_owned()));
+                // Text around an entity reference arrives in pieces: join
+                // them, keeping whitespace between pieces (`&quot; &quot;`).
+                let top = stack.last_mut().unwrap();
+                match top.children.last_mut() {
+                    Some(Node::Text(t)) => t.push_str(&s),
+                    _ if !s.trim().is_empty() => top.children.push(Node::Text(s.into_owned())),
+                    _ => {}
                 }
             }
             Event::GeneralRef(r) => {
@@ -233,5 +234,19 @@ mod tests {
         assert_eq!(a.child_text("B").as_deref(), Some("t < u"));
         let again = parse(&write(&a)).unwrap();
         assert_eq!(a, again);
+    }
+
+    /// Quotes written raw and written as entities read the same, so a
+    /// document with WKT in <SRS> survives a write and read.
+    #[test]
+    fn text_with_entities_is_one_node() {
+        let raw = parse(r#"<SRS>PROJCS["WGS 84", AXIS["E" ,EAST]]</SRS>"#).unwrap();
+        let esc =
+            parse("<SRS>PROJCS[&quot;WGS 84&quot;, AXIS[&quot;E&quot; ,EAST]]</SRS>").unwrap();
+        assert_eq!(raw, esc);
+        assert_eq!(raw.children.len(), 1);
+        assert_eq!(parse(&write(&raw)).unwrap(), raw);
+        let sp = parse("<T>&quot; &quot;</T>").unwrap();
+        assert_eq!(sp.text(), "\" \"");
     }
 }
