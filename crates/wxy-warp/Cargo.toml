@@ -20,6 +20,16 @@ serde.workspace = true
 proj4rs = { version = "0.3.0", default-features = false, features = ["crs-definitions"] }
 # rwarp is external (design doc 03, A2): the kernels the chunked warp runs
 rwarp = { version = "0.3", default-features = false, features = ["proj4rs"] }
+# trial CRS engine (src/crs.rs): WKT, PROJJSON, ESRI and datum steps
+# without PROJ; off by default, proj4rs stays the engine for wasm builds
+terrio-crs = { version = "0.2.2", default-features = false, optional = true }
+
+[features]
+default = []
+# build warp, points and zonal on terrio-crs instead of proj4rs
+terrio-crs = ["dep:terrio-crs"]
+# terrio-crs's fallback to wbprojection for projections it lacks
+terrio-crs-fallback = ["terrio-crs", "terrio-crs/wbprojection-fallback"]
 
 [dev-dependencies]
 async-trait.workspace = true

@@ -27,9 +27,10 @@
 //! Stage S4 warps domains whose spatial dims carry an affine mapping in a
 //! CRS frame; stage S5b adds curvilinear ones (2D x and y arrays at cell
 //! centres), through GDAL's geolocation-array transformer ported in
-//! `geoloc`. CRS work uses rwarp's pure-Rust `proj4rs` backend (EPSG
-//! codes and proj strings, no datum grids); PROJ itself waits on
-//! rust-proj-capability.
+//! `geoloc`. CRS work goes through [`crs`]: rwarp's pure-Rust `proj4rs`
+//! backend by default (EPSG codes and proj strings, no datum grids), or
+//! terrio-crs with the `terrio-crs` feature (also WKT, PROJJSON, ESRI
+//! codes and datum steps); PROJ itself waits on rust-proj-capability.
 
 use rwarp::approx::ApproxTransformer;
 use rwarp::geoloc_transform::{GeolocArrays, GeolocConvention, GeolocInverse, GeolocOptions};
@@ -44,6 +45,7 @@ use wxy_domain::{CellConvention, CoordArray, Domain, Frame, Mapping, Positions};
 use wxy_source::{read_window, Buffer, ChunkSource, Error, Result, Values, Window};
 
 mod cover;
+pub mod crs;
 mod explain;
 mod extract;
 mod rasterize;
@@ -328,7 +330,7 @@ impl SourceGrid {
                 // GDAL interpolates longitudes across the antimeridian when
                 // the arrays' CRS is geographic and every longitude is in
                 // [-180, 180]
-                let lon180 = proj(crs)?.is_latlong()
+                let lon180 = crs::is_geographic_degrees(crs)?
                     && lon
                         .values
                         .iter()
@@ -387,7 +389,7 @@ impl SourceGrid {
         if g[2] != 0.0 || g[4] != 0.0 || !near((g[1] * w).abs(), 360.0, g[1]) {
             return Ok(None);
         }
-        if !proj(&self.crs)?.is_latlong() {
+        if !crs::is_geographic_degrees(&self.crs)? {
             return Ok(None);
         }
         let (top, bottom) = (g[3], g[3] + g[5] * h);
@@ -446,8 +448,7 @@ fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<A
             let (to_src, to_dst) = if same {
                 (None, None)
             } else {
-                let (a, b) =
-                    rwarp::crs::crs_pair(&src.crs, &dst.crs).map_err(Error::Unsupported)?;
+                let (a, b) = crs::crs_pair(&src.crs, &dst.crs)?;
                 (Some(a), Some(b))
             };
             GenImgProjTransformer::with_backend(
@@ -470,8 +471,7 @@ fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<A
                 Box::new(Identity),
             )
         } else {
-            GenImgProjTransformer::new(&src.crs, src.geotransform, &dst.crs, dst.geotransform)
-                .map(|t| t.with_source_size(src.size().map(|n| n as usize)))
+            return projected(src, dst);
         }
         .map_err(Error::Unsupported)
     };
@@ -484,6 +484,27 @@ fn transformer(src: &SourceGrid, dst: &GridSpec, opts: &WarpOptions) -> Result<A
         exact: make()?,
         globe,
     })
+}
+
+/// rwarp's transformer between two CRSs with this build's engine
+/// ([`crs::CrsBackend::active`]), wrapping a geographic source's
+/// longitudes around its centre as GDAL does (`CENTER_LONG`; rwarp's
+/// `GenImgProjTransformer::new` and `with_source_size` decide it the same
+/// way for its own backend).
+fn projected(src: &SourceGrid, dst: &GridSpec) -> Result<GenImgProjTransformer> {
+    let (to_src, to_dst) = crs::crs_pair(&src.crs, &dst.crs)?;
+    let t = GenImgProjTransformer::with_backend(src.geotransform, dst.geotransform, to_src, to_dst)
+        .map_err(Error::Unsupported)?;
+    let size = src.size().map(|n| n as usize);
+    let center = if crs::is_geographic_degrees(&src.crs).unwrap_or(false) {
+        rwarp::transform::source_center_long(&src.geotransform, size, None)
+    } else {
+        None
+    };
+    Ok(t.with_center_long(match center {
+        Some(c) => rwarp::transform::CenterLong::At(c),
+        None => rwarp::transform::CenterLong::Off,
+    }))
 }
 
 /// Source and target in the same CRS: GDAL then skips reprojection and
@@ -538,15 +559,11 @@ impl rwarp::CrsTransform for GeolocToTarget {
     }
 }
 
-/// Parse `def` as the CRS backend does: an `EPSG:NNNN` code or a PROJ
-/// string (proj4rs: no WKT, PROJJSON or other authorities yet).
+/// Parse `def` as this build's CRS backend does (see [`crs`]): an
+/// `EPSG:NNNN` code or a PROJ string with proj4rs (the default); also
+/// WKT, PROJJSON, `ESRI:` and `OGC:CRS84` with the `terrio-crs` feature.
 pub fn check_crs(def: &str) -> Result<()> {
-    proj(def).map(|_| ())
-}
-
-fn proj(def: &str) -> Result<proj4rs::proj::Proj> {
-    proj4rs::proj::Proj::from_user_string(def)
-        .map_err(|e| Error::Unsupported(format!("CRS {def:?}: {e} (EPSG:NNNN or a PROJ string)")))
+    crs::check_crs(def)
 }
 
 /// The source window the whole target needs, or `None` when the target
@@ -1185,11 +1202,11 @@ fn special_points(src: &SourceGrid, dst: &GridSpec) -> Vec<(f64, f64)> {
     if same_crs(&src.crs, &dst.crs) {
         return Vec::new();
     }
-    let Ok(p) = proj(&src.crs) else {
+    let Ok(geographic) = crs::is_geographic_degrees(&src.crs) else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    if p.is_latlong() {
+    if geographic {
         let g = dst.geotransform;
         let det = g[1] * g[5] - g[2] * g[4];
         if det != 0.0 {
@@ -1200,21 +1217,19 @@ fn special_points(src: &SourceGrid, dst: &GridSpec) -> Vec<(f64, f64)> {
         }
         return out;
     }
-    let Ok(ll) = proj4rs::proj::Proj::from_user_string("+proj=longlat +datum=WGS84") else {
-        return Vec::new();
-    };
     // Source CRS to target pixels: rwarp's pipeline with the source's
     // positions taken as its pixels.
-    let Ok(to_dst) = GenImgProjTransformer::new(&src.crs, IDENTITY, &dst.crs, dst.geotransform)
-    else {
+    let Ok((a, b)) = crs::crs_pair(&src.crs, &dst.crs) else {
+        return Vec::new();
+    };
+    let Ok(to_dst) = GenImgProjTransformer::with_backend(IDENTITY, dst.geotransform, a, b) else {
         return Vec::new();
     };
     for lat in [-89.9999f64, 89.9999] {
-        let mut pt = (0.0f64, lat.to_radians(), 0.0f64);
-        if proj4rs::transform::transform(&ll, &p, &mut pt).is_err() {
+        let Some((sx, sy)) = crs::from_wgs84(&src.crs, 0.0, lat) else {
             continue;
-        }
-        let (mut x, mut y) = ([pt.0], [pt.1]);
+        };
+        let (mut x, mut y) = ([sx], [sy]);
         if rwarp::Transformer::transform(&to_dst, false, &mut x, &mut y)[0] {
             out.push((x[0], y[0]));
         }

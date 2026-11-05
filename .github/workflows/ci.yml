@@ -14,13 +14,19 @@ jobs:
         with:
           repository: wxylib/fixtures
           # Pinned, so a fixtures change moves core's oracles only when
-          # core says so. e203c85: warp, curvilinear, cf and index oracles
-          # from GDAL 3.14.0dev-739fcf03bf (wxylib/fixtures#11, #12);
-          # 6455dd5 adds mdimrefs/bluelink-synthetic (wxylib/fixtures#16).
-          ref: 6455dd52fc7273b737648bdf4022dfb454dd495f
+          # core says so. aed9d1e: warp, curvilinear, cf and index oracles
+          # from GDAL 3.14.0dev-739fcf03bf (wxylib/fixtures#11, #12), the vrt/
+          # corpus (#13, vrt-model's oracle), cog/ as an oracle-case set (#14),
+          # warpgrid answers (#17) and mdimrefs/bluelink-synthetic (#16).
+          ref: aed9d1e1cbc1ab0a4f35066f9dcabb3c76747c79
           path: fixtures
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+        env:
+          WXY_FIXTURES: ${{ github.workspace }}/fixtures
+      # CRS engine trial: the warp, points and zonal suites again on
+      # terrio-crs in place of proj4rs (wxy-warp's crs module).
+      - run: cargo test -p wxy-warp -p wxy-cli --features wxy-warp/terrio-crs
         env:
           WXY_FIXTURES: ${{ github.workspace }}/fixtures

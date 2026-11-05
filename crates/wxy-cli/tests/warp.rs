@@ -121,11 +121,17 @@ fn crs_the_writer_cannot_record_is_refused_before_reading() {
             .output()
             .unwrap()
     };
+    // OGC:CRS84 is recordable (proj:code) but proj4rs cannot read it;
+    // terrio-crs can, so with that engine it goes on to read the source.
+    let proj4rs = wxy_warp::crs::CrsBackend::active() == wxy_warp::crs::CrsBackend::Proj4rs;
     for crs in [
         "+proj=stere +lat_0=-90 +lat_ts=-71",
         "OGC:CRS84",
         "GEOGCRS[\"x\"]",
     ] {
+        if crs == "OGC:CRS84" && !proj4rs {
+            continue;
+        }
         let out = run(crs);
         assert!(!out.status.success());
         let err = String::from_utf8_lossy(&out.stderr);

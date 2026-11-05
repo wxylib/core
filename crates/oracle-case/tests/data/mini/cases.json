@@ -1,0 +1,52 @@
+{
+ "format": "oracle-case/0",
+ "set": "mini",
+ "description": "Test set for the oracle-case crate: two tiny GeoTIFFs and one refusal.",
+ "cases": [
+  {
+   "id": "f32/info",
+   "op": "raster.info",
+   "dsn": "f32.tif"
+  },
+  {
+   "id": "f32/all",
+   "op": "raster.read",
+   "dsn": "f32.tif"
+  },
+  {
+   "id": "f32/up",
+   "op": "raster.read",
+   "dsn": "f32.tif",
+   "window": [
+    0,
+    0,
+    2,
+    2
+   ],
+   "buf": [
+    4,
+    4
+   ],
+   "compare": {
+    "kind": "abs",
+    "tol": 1e-06
+   }
+  },
+  {
+   "id": "i16/band2",
+   "op": "raster.read",
+   "dsn": "vrt://i16.tif?bands=2",
+   "window": [
+    1,
+    0,
+    2,
+    2
+   ]
+  },
+  {
+   "id": "missing",
+   "op": "raster.read",
+   "dsn": "no-such-file.tif"
+  }
+ ]
+}
