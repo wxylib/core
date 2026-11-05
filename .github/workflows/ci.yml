@@ -15,8 +15,9 @@ jobs:
           repository: wxylib/fixtures
           # Pinned, so a fixtures change moves core's oracles only when
           # core says so. e203c85: warp, curvilinear, cf and index oracles
-          # from GDAL 3.14.0dev-739fcf03bf (wxylib/fixtures#11, #12).
-          ref: e203c85f322bae598ec257763ae6f060937f3cc7
+          # from GDAL 3.14.0dev-739fcf03bf (wxylib/fixtures#11, #12);
+          # 6455dd5 adds mdimrefs/bluelink-synthetic (wxylib/fixtures#16).
+          ref: 6455dd52fc7273b737648bdf4022dfb454dd495f
           path: fixtures
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
