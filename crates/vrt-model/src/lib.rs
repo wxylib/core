@@ -7,6 +7,9 @@
 //! - [`classic`]: classic raster VRT as typed values; unknown elements kept.
 //! - [`vrtcon`]: `vrt://` strings lowered to a classic VRT.
 //! - [`plan`]: which source windows a read needs, and where they land.
+//! - [`footprint`]: where each source is placed, and which sources meet a
+//!   box (the catalogue view a map client needs).
+//! - [`url`]: source names as plain URLs a client can fetch.
 //!
 //! Readers do the I/O: they open the sources the plan names, sample them as
 //! [`plan::nearest_indices`] says, and apply the plan's operations.
@@ -14,15 +17,19 @@
 
 pub mod classic;
 pub mod dsn;
+pub mod footprint;
 pub mod plan;
+pub mod url;
 pub mod vrtcon;
 pub mod xml;
 
 pub use classic::{Band, Dataset, Rect, Source};
 pub use dsn::Dsn;
+pub use footprint::{footprints, sources_in_bounds, Bounds, Footprint};
 pub use plan::{
     plan_band, plan_band_leaves, LeafRow, Op, PlanRow, Request, Resolver, SourceWindow,
 };
+pub use url::{fetch_url, NotFetchable, UrlConfig};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
