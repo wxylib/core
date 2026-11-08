@@ -1,6 +1,6 @@
 //! Byte-reference tables as a source of virtual arrays.
 //!
-//! An mdim-refs/0.2 table (hypertidy/zaro, `mdimrefs://`) holds one row
+//! A byterefs/0.1 table (formerly mdim-refs/0.2; hypertidy/zaro, `mdimrefs://`) holds one row
 //! per chunk of an array that a mosaic has already placed in its global
 //! chunk grid: `dim_0 .. dim_{n-1}, present, path, offset, size, info`.
 //! Array metadata (dims, shape, chunks, numpy dtype, fill, Zarr v2 codec
@@ -42,8 +42,10 @@ use wxy_source::{Error, Result};
 
 use crate::{ChunkRef, VirtualArray};
 
-/// The table format versions this reader takes.
-pub const FORMAT_PREFIX: &str = "mdim-refs/";
+/// The table format identifiers this reader takes: `byterefs/0.x`
+/// (byterefs/spec decision 0003; what raad.virtualize writes) and the
+/// legacy `mdim-refs/0.x`, the same layout, read during the transition.
+pub const FORMAT_PREFIXES: &[&str] = &["byterefs/", "mdim-refs/"];
 
 /// Read the exported table in `dir` (`arrays.json` and
 /// `refs_<array>.parquet`) as virtual arrays, one per array at `/<name>`:
@@ -110,9 +112,9 @@ fn parse_table(bytes: &[u8]) -> Result<Value> {
     let table: Value =
         serde_json::from_slice(bytes).map_err(|e| Error::Decode(format!("arrays.json: {e}")))?;
     let format = table["format_version"].as_str().unwrap_or("");
-    if !format.starts_with(FORMAT_PREFIX) {
+    if !FORMAT_PREFIXES.iter().any(|p| format.starts_with(p)) {
         return Err(Error::Unsupported(format!(
-            "not an mdim-refs table: {format:?}"
+            "not a byterefs (or mdim-refs) table: {format:?}"
         )));
     }
     Ok(table)
@@ -662,6 +664,15 @@ mod tests {
 
     /// A 1 x 3 chunk grid: one referenced chunk (remapped), one inline,
     /// one absent.
+    #[test]
+    fn format_identifiers() {
+        let t = |f: &str| parse_table(json!({"format_version": f}).to_string().as_bytes());
+        assert!(t("byterefs/0.1").is_ok());
+        assert!(t("mdim-refs/0.2").is_ok());
+        assert!(t("kerchunk/1").is_err());
+        assert!(parse_table(b"{}").is_err());
+    }
+
     #[test]
     fn rows_split_into_refs_and_inline() {
         let dir = std::env::temp_dir().join(format!("wxy-refs-unit-{}", std::process::id()));
