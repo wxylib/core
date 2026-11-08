@@ -662,8 +662,6 @@ mod tests {
 
     use super::*;
 
-    /// A 1 x 3 chunk grid: one referenced chunk (remapped), one inline,
-    /// one absent.
     #[test]
     fn format_identifiers() {
         let t = |f: &str| parse_table(json!({"format_version": f}).to_string().as_bytes());
@@ -673,6 +671,8 @@ mod tests {
         assert!(parse_table(b"{}").is_err());
     }
 
+    /// A 1 x 3 chunk grid: one referenced chunk (remapped), one inline,
+    /// one absent.
     #[test]
     fn rows_split_into_refs_and_inline() {
         let dir = std::env::temp_dir().join(format!("wxy-refs-unit-{}", std::process::id()));
