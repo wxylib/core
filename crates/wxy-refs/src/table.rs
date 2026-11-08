@@ -49,7 +49,8 @@ pub const FORMAT_PREFIX: &str = "mdim-refs/";
 /// `refs_<array>.parquet`) as virtual arrays, one per array at `/<name>`:
 /// referenced arrays with their chunk references, coordinates with their
 /// values inline. Source paths are rewritten by the `remap` rows of
-/// `target` (longest prefix first); a path that is then relative is taken
+/// `target` (longest prefix first; `None` takes the table's
+/// `meta.default_target`, `Some("")` keeps paths verbatim); a path that is then relative is taken
 /// relative to `dir`, and a local path becomes a `file://` URL.
 pub fn from_refs_table(dir: impl AsRef<Path>, target: Option<&str>) -> Result<Vec<VirtualArray>> {
     let dir = std::fs::canonicalize(dir.as_ref()).map_err(io)?;
@@ -467,8 +468,11 @@ fn coordinate(row: &ArrayRow) -> Result<VirtualArray> {
 }
 
 /// `(prefix, replacement)` pairs for `target`, longest prefix first.
+/// With no target given, the table's `meta.default_target` is used
+/// (byterefs decision 0004); an empty target, or none at all, leaves
+/// source paths verbatim.
 fn remap_rules(table: &Value, target: Option<&str>) -> Vec<(String, String)> {
-    let Some(target) = target else {
+    let Some(target) = target.or_else(|| table["meta"]["default_target"].as_str()) else {
         return Vec::new();
     };
     let mut out: Vec<(String, String)> = table["remap"]
@@ -748,6 +752,25 @@ mod tests {
     /// Latitude and longitude are recognised by any CF unit spelling or
     /// `standard_name`, not only by name (BRAN2023's `yt_ocean` is in
     /// `degrees_N`).
+    #[test]
+    fn default_target_applies_when_none_is_given() {
+        let table = json!({
+            "meta": {"default_target": "public"},
+            "remap": [
+                {"target": "public", "prefix": "/g/data/", "replacement": "https://host/"},
+                {"target": "other", "prefix": "/g/data/", "replacement": "s3://b/"},
+            ],
+        });
+        let rules = |t| remap_rules(&table, t);
+        assert_eq!(
+            rules(None),
+            vec![("/g/data/".into(), "https://host/".into())]
+        );
+        assert_eq!(rules(Some("other"))[0].1, "s3://b/");
+        assert!(rules(Some("")).is_empty());
+        assert!(remap_rules(&json!({"remap": table["remap"]}), None).is_empty());
+    }
+
     #[test]
     fn cf_axes_by_units_or_standard_name() {
         let axis = |name: &str, attrs: Value| {
