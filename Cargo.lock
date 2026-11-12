@@ -1172,9 +1172,15 @@ dependencies = [
 
 [[package]]
 name = "controlledburn"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8750438e3add7134dd0cb0091976a156ad4ba3ccdf05beed20dfd6c474ab72"
+checksum = "811c442fce690d0e5cdc7de91e3bd8f3cc89266a63316c103723a20f910afe64"
+
+[[package]]
+name = "controlledburn"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04fb7df5ede8c788a576d1f44f600e189f95c56913c620f3299c8b3b009f504f"
 
 [[package]]
 name = "convert_case"
@@ -3844,7 +3850,7 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "990539d6f3ccc5227217416e306423664d92e0dfed89ad977caf73d4aad4a81b"
 dependencies = [
- "controlledburn",
+ "controlledburn 0.2.4",
  "proj4rs",
  "vaster",
 ]
@@ -5354,7 +5360,7 @@ name = "wxy-warp"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "controlledburn",
+ "controlledburn 0.3.1",
  "proj4rs",
  "rwarp",
  "serde",
