@@ -151,10 +151,13 @@ impl Burner {
     }
 
     /// Exact cover of every feature (each a set of polygons), from
-    /// controlledburn in index space, each polygon with its holes. A small
-    /// polygon (its box under [`SMALL_WINDOW`] cells) is resolved on a
-    /// dense window ([`controlledburn::CoverageWindow`]); larger ones go
-    /// through the sparse burn.
+    /// controlledburn in index space, each polygon with its holes. A
+    /// feature of one small polygon (its box under [`SMALL_WINDOW`] cells)
+    /// is resolved on a dense window ([`controlledburn::CoverageWindow`]);
+    /// the rest go through the sparse burn, one multipolygon per feature,
+    /// so a cell that several parts of a feature reach gets one record
+    /// (parts sharing a border make a full cell, overlapping parts count
+    /// once).
     pub(crate) fn coverage(
         &self,
         features: &[Vec<Rings>],
@@ -167,6 +170,7 @@ impl Burner {
         let mut window = CoverageWindow::default();
         let (mut geoms, mut owner) = (Vec::new(), Vec::new());
         for (k, polys) in features.iter().enumerate() {
+            let mut parts = Vec::new();
             for rings in polys {
                 let rings: Vec<(Vec<f64>, Vec<f64>)> = rings
                     .iter()
@@ -181,7 +185,10 @@ impl Burner {
                 let Some((xs, ys)) = rings.first() else {
                     continue;
                 };
-                if window.reset_to_ring(xs, ys) && window.ncol() * window.nrow() <= SMALL_WINDOW {
+                if polys.len() == 1
+                    && window.reset_to_ring(xs, ys)
+                    && window.ncol() * window.nrow() <= SMALL_WINDOW
+                {
                     for (i, (xs, ys)) in rings.iter().enumerate() {
                         window.add_ring(xs, ys, if i == 0 { 1.0 } else { -1.0 });
                     }
@@ -198,9 +205,14 @@ impl Burner {
                             .collect()
                     })
                     .collect();
-                geoms.push(Geometry::Polygon(Polygon::new(rings)));
-                owner.push(k);
+                parts.push(Polygon::new(rings));
             }
+            match parts.len() {
+                0 => continue,
+                1 => geoms.push(Geometry::Polygon(parts.pop().unwrap())),
+                _ => geoms.push(Geometry::MultiPolygon(parts)),
+            }
+            owner.push(k);
         }
         if geoms.is_empty() {
             return Ok(out);
@@ -566,4 +578,58 @@ pub async fn zonal_stats<S: ChunkSource + ?Sized>(
         }
     }
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wxy_domain::{Affine, Dim, Frame, Mapping, Positions};
+
+    /// 300 by 300 cells of 1 m in EPSG:3031 (big enough that the parts
+    /// below go through the sparse burn, not the dense window).
+    fn domain() -> Domain {
+        let mut d = Domain::new(vec![Dim::new("y", 300), Dim::new("x", 300)]);
+        let k = d.add_mapping(Mapping::new(
+            vec![0, 1],
+            Positions::Affine(Affine([0.0, 1.0, 0.0, 300.0, 0.0, -1.0])),
+            Frame::crs("EPSG:3031"),
+        ));
+        d.set_primary(k);
+        d
+    }
+
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Rings {
+        vec![vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]]
+    }
+
+    /// Sum of span weights per cell, unclamped, as zonal statistics weigh.
+    fn weights(spans: &[Span]) -> BTreeMap<[u32; 2], f32> {
+        let mut m = BTreeMap::new();
+        for s in spans {
+            for c in s.c0..s.c1 {
+                *m.entry([s.row, c]).or_insert(0.0) += s.w;
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn parts_of_a_feature_weigh_each_cell_once() {
+        let b = Burner::new(&domain(), "EPSG:3031").unwrap();
+        // two halves meeting at x = 150.5 (inside a column), and a part
+        // overlapping the left half
+        let halves = vec![
+            rect(0.25, 0.25, 150.5, 290.25),
+            rect(150.5, 0.25, 299.75, 290.25),
+            rect(10.0, 10.0, 100.0, 100.0),
+        ];
+        let spans = b.coverage(&[halves], None).unwrap();
+        let w = weights(&spans[0]);
+        let max = w.values().fold(0f32, |m, v| m.max(*v));
+        assert!(max <= 1.0 + 1e-6, "a cell weighs {max}");
+        // the shared column is a full cell, not 0.5 + 0.5 edges
+        assert_eq!(w[&[100, 150]], 1.0);
+        let total: f64 = w.values().map(|v| *v as f64).sum();
+        assert!((total - 299.5 * 290.0).abs() < 1e-2, "total {total}");
+    }
 }
