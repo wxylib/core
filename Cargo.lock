@@ -887,6 +887,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bigcurve"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b379533b5ee4677b098e88195d8dcc9d9caae591054a1bbfc0b1b3da4b86ce63"
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1172,15 +1178,9 @@ dependencies = [
 
 [[package]]
 name = "controlledburn"
-version = "0.2.4"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "811c442fce690d0e5cdc7de91e3bd8f3cc89266a63316c103723a20f910afe64"
-
-[[package]]
-name = "controlledburn"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04fb7df5ede8c788a576d1f44f600e189f95c56913c620f3299c8b3b009f504f"
+checksum = "cbba8a5973a9e57b01c6f77d922cf78170975466832e0bc5fc4695188fb1599c"
 
 [[package]]
 name = "convert_case"
@@ -3341,9 +3341,9 @@ dependencies = [
 
 [[package]]
 name = "proj4rs"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c237a4e4da4e0f2eae7a5d078df926894ccf1b315043dbccebc413888487d562"
+checksum = "b1ee6afb8b75ae1ca17036298626d981dff6ba14278ccf0c6cf3bbb473228177"
 dependencies = [
  "console_log",
  "crs-definitions",
@@ -3846,11 +3846,12 @@ dependencies = [
 
 [[package]]
 name = "rwarp"
-version = "0.3.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "990539d6f3ccc5227217416e306423664d92e0dfed89ad977caf73d4aad4a81b"
+checksum = "afbf7939f02bc52feb3fd4b4316528bbb8c86d248ccba9355ddf98e9ba0715ba"
 dependencies = [
- "controlledburn 0.2.4",
+ "bigcurve",
+ "controlledburn",
  "proj4rs",
  "vaster",
 ]
@@ -4366,12 +4367,12 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "terrio-crs"
-version = "0.2.2"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "802dbd9b5634f68f5ae1e85dfb82713bfe6f1204b6ec38bc3be5e84df90003fc"
+checksum = "a75b204c693afa267f00b04e9bf7a4158a6132cd0d0213bfe0e1317aa59d6b33"
 dependencies = [
  "geographiclib-rs",
- "rayon",
+ "libc",
  "ruzstd",
  "serde",
  "serde_json",
@@ -5360,7 +5361,7 @@ name = "wxy-warp"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "controlledburn 0.3.1",
+ "controlledburn",
  "proj4rs",
  "rwarp",
  "serde",

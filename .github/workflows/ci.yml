@@ -14,11 +14,13 @@ jobs:
         with:
           repository: wxylib/fixtures
           # Pinned, so a fixtures change moves core's oracles only when
-          # core says so. aed9d1e: warp, curvilinear, cf and index oracles
+          # core says so. ce5e779: warp, curvilinear, cf and index oracles
           # from GDAL 3.14.0dev-739fcf03bf (wxylib/fixtures#11, #12), the vrt/
           # corpus (#13, vrt-model's oracle), cog/ as an oracle-case set (#14),
-          # warpgrid answers (#17) and mdimrefs/bluelink-synthetic (#16).
-          ref: aed9d1e88390f5189e540a18d406b47568738a33
+          # warpgrid answers (#17), mdimrefs/bluelink-synthetic (#16), the
+          # rasterwise set (#18), BRAN oracle hashes (#19) and the producer
+          # row check (#20).
+          ref: ce5e7795b4815494cdcb538cb45402602ccca57e
           path: fixtures
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
