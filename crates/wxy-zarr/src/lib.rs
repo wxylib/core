@@ -23,6 +23,10 @@
 //! Longitude and latitude coordinates without a `proj:` CRS are taken to
 //! be WGS84 (EPSG:4326), as GDAL's netCDF driver assumes.
 //!
+//! The crate builds for wasm32 (the browser): [`open`] takes any zarrs
+//! async storage, such as one over `fetch`; the path and URL openers are
+//! native only.
+//!
 //! Stage S3 reads regular chunk grids of fixed-size numeric types.
 //! [`write`] writes one georeferenced grid the same way (stage S4).
 
@@ -44,7 +48,9 @@ use zarrs::group::Group;
 use zarrs::storage::AsyncReadableStorageTraits;
 
 pub mod write;
-pub use write::{create_path, create_store, write_path, write_store, GridArray, GridWriter};
+#[cfg(not(target_arch = "wasm32"))]
+pub use write::{create_path, write_path};
+pub use write::{create_store, write_store, GridArray, GridWriter};
 
 type Storage = dyn AsyncReadableStorageTraits;
 
@@ -60,6 +66,15 @@ pub struct ZarrSource {
     grid: ChunkGrid,
     dtype: DataType,
 }
+
+// zarrs drops `Send` and `Sync` from its trait objects on wasm32, where
+// there is one thread; `ChunkSource` asks for both everywhere. Sound for
+// wasm32 without the threads proposal (no shared memory), which is what
+// the browser build is.
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for ZarrSource {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for ZarrSource {}
 
 /// Open array `array` (a path such as `"/data"`) in a local store.
 #[cfg(not(target_arch = "wasm32"))]
