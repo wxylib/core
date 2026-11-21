@@ -12,17 +12,17 @@ categories = ["science::geo"]
 wxy-domain.workspace = true
 wxy-source.workspace = true
 # exact cell coverage of polygons (exactextract's algorithm), sparse
-controlledburn = "0.3.1"
+controlledburn = "0.3.3"
 # plans and options as values (EXPLAIN, dry runs, bindings)
 serde.workspace = true
 # the same proj4rs rwarp uses: two copies in one wasm build both export
 # proj4rs's wasm-bindgen `Point`, which wasm-bindgen refuses
-proj4rs = { version = "0.3.0", default-features = false, features = ["crs-definitions"] }
+proj4rs = { version = "0.3.1", default-features = false, features = ["crs-definitions"] }
 # rwarp is external (design doc 03, A2): the kernels the chunked warp runs
-rwarp = { version = "0.3", default-features = false, features = ["proj4rs"] }
+rwarp = { version = "0.5", default-features = false, features = ["proj4rs"] }
 # trial CRS engine (src/crs.rs): WKT, PROJJSON, ESRI and datum steps
 # without PROJ; off by default, proj4rs stays the engine for wasm builds
-terrio-crs = { version = "0.2.2", default-features = false, optional = true }
+terrio-crs = { version = "0.2.4", default-features = false, optional = true }
 
 [features]
 default = []

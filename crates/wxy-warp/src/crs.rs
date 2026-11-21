@@ -172,22 +172,26 @@ mod terrio {
 
     impl rwarp::CrsTransform for Backend {
         fn convert(&self, x: f64, y: f64) -> Option<(f64, f64)> {
-            let got = self.t.transform(x, y).ok().or_else(|| {
-                // terrio-crs 0.2.2 refuses a point exactly at a pole
-                // (EPSG:4326 (lon, -90) to EPSG:3031), which PROJ maps to
-                // the projection's pole. Approach it from two opposite
-                // longitudes, 1e-10 degrees short, and take the midpoint:
-                // the first-order offsets cancel, so a pole on a cell edge
-                // stays on it. Remove once fixed upstream;
-                // tests/crs_backends.rs pole_is_a_point.
-                if !(self.pole && y.abs() == 90.0) {
-                    return None;
-                }
+            // A point exactly at a pole (EPSG:4326 (lon, -90) to EPSG:3031)
+            // is the projection's pole in PROJ, whatever the longitude.
+            // terrio-crs 0.2.2 refused it; 0.2.3 on accepts it but lands
+            // about 4e-10 m off, in the direction of the longitude, which
+            // is enough to move a pole on a cell corner into one cell or
+            // another. So a pole never goes through as given: approach it
+            // from two opposite longitudes, 1e-10 degrees short, and take
+            // the midpoint. The first-order offsets cancel, so a pole on a
+            // cell edge stays on it. Remove once terrio-crs maps the pole
+            // to the pole; tests/crs_backends.rs pole_is_a_point and the
+            // polar case of tests/points.rs.
+            let got = if self.pole && y.abs() == 90.0 {
                 let lat = y.signum() * (90.0 - 1e-10);
-                let a = self.t.transform(x, lat).ok()?;
-                let b = self.t.transform(x + 180.0, lat).ok()?;
-                Some(((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0))
-            });
+                match (self.t.transform(x, lat), self.t.transform(x + 180.0, lat)) {
+                    (Ok(a), Ok(b)) => Some(((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)),
+                    _ => None,
+                }
+            } else {
+                self.t.transform(x, y).ok()
+            };
             got.filter(|(x, y)| x.is_finite() && y.is_finite())
         }
     }
